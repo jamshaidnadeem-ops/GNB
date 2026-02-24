@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pydantic
+pymysql
+selenium
+undetected-chromedriver
+beautifulsoup4
+requests
+pyngrok
+

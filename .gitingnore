@@ -1,0 +1,8 @@
+@"
+.env
+__pycache__/
+*.pyc
+api.log
+gnb_scraper.log
+*.log
+"@ | Out-File -FilePath .gitignore -Encoding utf8
