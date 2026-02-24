@@ -119,7 +119,8 @@ if __name__ == "__main__":
     import uvicorn
     import threading
     
-    port = 8000
+    import os
+    port = int(os.environ.get("PORT", 8000))
     
     logging.info("Starting FastAPI server...")
     

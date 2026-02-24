@@ -77,7 +77,7 @@ PAGE_LOAD_DELAY = 4
 # OFF-SCREEN to a large negative coordinate. Chrome still thinks it is "visible"
 # so lazy-load, Intersection Observers, and JS timers all keep firing normally.
 # Set HEADLESS = True only for server/deployment (no display at all).
-HEADLESS = False
+HEADLESS = os.environ.get('HEADLESS', 'True').lower() == 'true'
 WINDOW_WIDTH  = 1920
 WINDOW_HEIGHT = 1080
 # Off-screen position — browser is "open" but behind / off your monitor
@@ -149,14 +149,11 @@ def start_driver():
     options.page_load_strategy = 'eager'
 
     try:
-        driver = uc.Chrome(options=options, version_main=144)
+        # Use auto-detection by default for better compatibility on Railway/Linux
+        driver = uc.Chrome(options=options, use_subprocess=True)
     except Exception as e:
-        logging.warning(f"Failed with version_main=144: {e}. Trying auto-detect...")
-        try:
-            driver = uc.Chrome(options=options, use_subprocess=True)
-        except Exception as e2:
-            logging.error(f"Failed to initialize driver: {e2}")
-            raise e2
+        logging.error(f"Failed to initialize driver: {e}")
+        raise e
 
     driver.set_page_load_timeout(60)
     driver.set_script_timeout(60)
