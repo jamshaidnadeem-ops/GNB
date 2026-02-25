@@ -1,0 +1,1473 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+    <title>GNB — Scraper Control</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link
+        href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Syne:wght@700;800&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --bg: #09090c;
+            --surf: #0f1015;
+            --panel: #14151c;
+            --border: #1e2028;
+            --b2: #282c38;
+            --ac: #00e5ff;
+            --pu: #8b5cf6;
+            --gr: #00ff88;
+            --ye: #ffd600;
+            --re: #ff3b5c;
+            --or: #ff8c00;
+            --tx: #dde3f0;
+            --mu: #454d62;
+            --dim: #252836;
+        }
+
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0
+        }
+
+        html,
+        body {
+            height: 100%;
+            overflow: hidden
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--tx);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0, 0, 0, .055) 2px, rgba(0, 0, 0, .055) 4px);
+            pointer-events: none;
+            z-index: 9000
+        }
+
+        header {
+            height: 52px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 22px;
+            background: rgba(9, 9, 12, .96);
+            backdrop-filter: blur(10px);
+            position: relative;
+            z-index: 200;
+            flex-shrink: 0
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 10px
+        }
+
+        .hex {
+            width: 26px;
+            height: 26px;
+            background: var(--ac);
+            clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+            animation: glow 3s ease-in-out infinite
+        }
+
+        @keyframes glow {
+
+            0%,
+            100% {
+                filter: drop-shadow(0 0 5px rgba(0, 229, 255, .5))
+            }
+
+            50% {
+                filter: drop-shadow(0 0 14px rgba(0, 229, 255, .9))
+            }
+        }
+
+        .logo-txt {
+            font-family: 'Syne', sans-serif;
+            font-weight: 800;
+            font-size: 17px;
+            color: #fff;
+            letter-spacing: .1em
+        }
+
+        .logo-txt span {
+            color: var(--ac)
+        }
+
+        .chip {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 12px;
+            border-radius: 20px;
+            border: 1px solid var(--b2);
+            background: var(--panel);
+            font-size: 11px;
+            color: var(--mu);
+            transition: all .3s
+        }
+
+        .chip.on {
+            border-color: rgba(0, 255, 136, .35);
+            color: var(--gr);
+            background: rgba(0, 255, 136, .05)
+        }
+
+        .dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: currentColor
+        }
+
+        .chip.on .dot {
+            animation: bl 1s ease-in-out infinite
+        }
+
+        @keyframes bl {
+
+            0%,
+            100% {
+                opacity: 1
+            }
+
+            50% {
+                opacity: .2
+            }
+        }
+
+        .hdr-r {
+            display: flex;
+            align-items: center;
+            gap: 10px
+        }
+
+        .api-tag {
+            font-size: 10px;
+            color: var(--mu);
+            padding: 3px 8px;
+            border: 1px solid var(--border);
+            border-radius: 4px
+        }
+
+        .api-tag span {
+            color: var(--ac)
+        }
+
+        .bsm {
+            background: var(--panel);
+            border: 1px solid var(--b2);
+            color: var(--tx);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            padding: 5px 11px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all .15s
+        }
+
+        .bsm:hover {
+            background: var(--dim)
+        }
+
+        .lbar {
+            height: 2px;
+            background: linear-gradient(90deg, var(--pu), var(--ac), var(--pu));
+            background-size: 200%;
+            animation: sh 1.4s linear infinite;
+            display: none
+        }
+
+        .lbar.on {
+            display: block
+        }
+
+        @keyframes sh {
+            0% {
+                background-position: 200% 0
+            }
+
+            100% {
+                background-position: -200% 0
+            }
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: 270px 1fr;
+            height: calc(100vh - 54px)
+        }
+
+        .sb {
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            background: var(--surf)
+        }
+
+        .sb-stats {
+            padding: 14px;
+            border-bottom: 1px solid var(--border);
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 5px
+        }
+
+        .sc {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 5px;
+            padding: 9px
+        }
+
+        .sc.full {
+            grid-column: 1/-1
+        }
+
+        .sv {
+            font-family: 'Syne', sans-serif;
+            font-weight: 800;
+            font-size: 19px;
+            color: #fff;
+            line-height: 1;
+            margin-bottom: 2px
+        }
+
+        .sv.ac {
+            color: var(--ac)
+        }
+
+        .sv.gr {
+            color: var(--gr)
+        }
+
+        .sv.ye {
+            color: var(--ye)
+        }
+
+        .sv.or {
+            color: var(--or)
+        }
+
+        .sl {
+            font-size: 9px;
+            color: var(--mu);
+            letter-spacing: .12em;
+            text-transform: uppercase
+        }
+
+        .sb-srch {
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--border)
+        }
+
+        .sb-srch input {
+            width: 100%;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 6px 9px;
+            color: var(--tx);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px
+        }
+
+        .sb-srch input:focus {
+            outline: none;
+            border-color: var(--ac)
+        }
+
+        .sb-srch input::placeholder {
+            color: var(--mu)
+        }
+
+        .city-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 6px
+        }
+
+        .city-list::-webkit-scrollbar {
+            width: 3px
+        }
+
+        .city-list::-webkit-scrollbar-thumb {
+            background: var(--dim)
+        }
+
+        .cr {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 5px 7px;
+            border-radius: 4px;
+            transition: background .1s
+        }
+
+        .cr:hover {
+            background: var(--panel)
+        }
+
+        .cn {
+            font-size: 11px;
+            color: var(--tx);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 145px
+        }
+
+        .badges {
+            display: flex;
+            gap: 3px;
+            flex-shrink: 0
+        }
+
+        .bx {
+            font-size: 9px;
+            padding: 2px 5px;
+            border-radius: 3px;
+            font-weight: 600
+        }
+
+        .bx.p1 {
+            background: rgba(0, 255, 136, .1);
+            color: var(--gr)
+        }
+
+        .bx.p2 {
+            background: rgba(0, 229, 255, .1);
+            color: var(--ac)
+        }
+
+        .bx.nd {
+            background: rgba(69, 77, 98, .2);
+            color: var(--mu)
+        }
+
+        .bx.run {
+            background: rgba(255, 214, 0, .1);
+            color: var(--ye);
+            animation: bl 1s ease-in-out infinite
+        }
+
+        .sb-btns {
+            padding: 12px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            gap: 5px
+        }
+
+        .btn {
+            width: 100%;
+            padding: 9px;
+            border: none;
+            border-radius: 5px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all .2s;
+            letter-spacing: .06em;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px
+        }
+
+        .btn:disabled {
+            opacity: .3;
+            cursor: not-allowed
+        }
+
+        .btn-go {
+            background: var(--ac);
+            color: #000
+        }
+
+        .btn-go:hover:not(:disabled) {
+            background: #33eaff;
+            box-shadow: 0 0 16px rgba(0, 229, 255, .3)
+        }
+
+        .btn-stop {
+            background: transparent;
+            color: var(--re);
+            border: 1px solid rgba(255, 59, 92, .25)
+        }
+
+        .btn-stop:hover:not(:disabled) {
+            background: rgba(255, 59, 92, .08);
+            border-color: var(--re)
+        }
+
+        .btn-sec {
+            background: transparent;
+            color: var(--tx);
+            border: 1px solid var(--b2)
+        }
+
+        .btn-sec:hover:not(:disabled) {
+            background: var(--panel)
+        }
+
+        .main {
+            display: flex;
+            flex-direction: column;
+            overflow: hidden
+        }
+
+        .tabs {
+            height: 44px;
+            border-bottom: 1px solid var(--border);
+            background: var(--surf);
+            display: flex;
+            align-items: center;
+            padding: 0 18px;
+            gap: 4px;
+            flex-shrink: 0
+        }
+
+        .tab {
+            background: none;
+            border: none;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            color: var(--mu);
+            cursor: pointer;
+            padding: 5px 11px;
+            border-radius: 4px;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+            transition: all .15s;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -1px
+        }
+
+        .tab.active {
+            color: var(--ac);
+            background: rgba(0, 229, 255, .07);
+            border-bottom-color: var(--ac)
+        }
+
+        .tab:hover:not(.active) {
+            color: var(--tx);
+            background: var(--panel)
+        }
+
+        .tabs-r {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 8px
+        }
+
+        .prog-wrap {
+            display: flex;
+            align-items: center;
+            gap: 7px
+        }
+
+        .prog-bg {
+            width: 130px;
+            height: 3px;
+            background: var(--border);
+            border-radius: 2px;
+            overflow: hidden
+        }
+
+        .prog-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--pu), var(--ac));
+            border-radius: 2px;
+            transition: width .6s;
+            width: 0%
+        }
+
+        .prog-pct {
+            font-size: 10px;
+            color: var(--mu);
+            min-width: 28px;
+            text-align: right
+        }
+
+        .panel {
+            flex: 1;
+            overflow: hidden;
+            display: none;
+            flex-direction: column
+        }
+
+        .panel.active {
+            display: flex
+        }
+
+        .log-bar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 7px 14px;
+            border-bottom: 1px solid var(--border);
+            background: var(--surf);
+            flex-shrink: 0
+        }
+
+        .log-bar label {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            cursor: pointer;
+            font-size: 10px;
+            color: var(--mu)
+        }
+
+        .log-bar input[type=checkbox] {
+            accent-color: var(--ac)
+        }
+
+        .log-body {
+            flex: 1;
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: var(--dim) transparent
+        }
+
+        .log-body::-webkit-scrollbar {
+            width: 4px
+        }
+
+        .log-body::-webkit-scrollbar-thumb {
+            background: var(--dim);
+            border-radius: 2px
+        }
+
+        .le {
+            display: flex;
+            border-bottom: 1px solid rgba(30, 32, 40, .5);
+            animation: fi .18s ease
+        }
+
+        @keyframes fi {
+            from {
+                opacity: 0;
+                transform: translateY(-2px)
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0)
+            }
+        }
+
+        .l-ts {
+            color: var(--mu);
+            padding: 2px 10px;
+            min-width: 76px;
+            flex-shrink: 0;
+            border-right: 1px solid var(--border);
+            font-size: 10px;
+            display: flex;
+            align-items: center
+        }
+
+        .l-lv {
+            padding: 2px 8px;
+            min-width: 62px;
+            flex-shrink: 0;
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: .12em;
+            display: flex;
+            align-items: center;
+            justify-content: center
+        }
+
+        .l-lv.INFO {
+            color: var(--ac)
+        }
+
+        .l-lv.WARN {
+            color: var(--ye)
+        }
+
+        .l-lv.ERROR {
+            color: var(--re)
+        }
+
+        .l-lv.OK {
+            color: var(--gr)
+        }
+
+        .l-msg {
+            padding: 2px 12px;
+            display: flex;
+            align-items: center;
+            font-size: 11px;
+            word-break: break-all
+        }
+
+        .l-msg.em {
+            color: var(--re)
+        }
+
+        .l-msg.wm {
+            color: var(--ye)
+        }
+
+        .l-msg.gm {
+            color: var(--gr)
+        }
+
+        .log-div {
+            padding: 7px 12px;
+            border-left: 3px solid var(--ac);
+            background: linear-gradient(90deg, rgba(0, 229, 255, .05), transparent);
+            color: var(--ac);
+            font-weight: 700;
+            font-size: 10px;
+            letter-spacing: .12em;
+            font-family: 'Syne', sans-serif
+        }
+
+        .log-div.p2 {
+            border-color: var(--pu);
+            background: linear-gradient(90deg, rgba(139, 92, 246, .06), transparent);
+            color: var(--pu)
+        }
+
+        .log-div.bat {
+            border-color: var(--ye);
+            background: linear-gradient(90deg, rgba(255, 214, 0, .05), transparent);
+            color: var(--ye)
+        }
+
+        .log-empty {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--mu);
+            gap: 8px
+        }
+
+        .leads-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 14px 18px;
+            scrollbar-width: thin;
+            scrollbar-color: var(--dim) transparent
+        }
+
+        .leads-body::-webkit-scrollbar {
+            width: 4px
+        }
+
+        .leads-body::-webkit-scrollbar-thumb {
+            background: var(--dim)
+        }
+
+        .ltbar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 12px;
+            flex-wrap: wrap
+        }
+
+        .linput {
+            background: var(--surf);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 6px 10px;
+            color: var(--tx);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px
+        }
+
+        .linput:focus {
+            outline: none;
+            border-color: var(--ac)
+        }
+
+        .linput::placeholder {
+            color: var(--mu)
+        }
+
+        .lsel {
+            background: var(--surf);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 6px 9px;
+            color: var(--tx);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            cursor: pointer
+        }
+
+        .lsel:focus {
+            outline: none;
+            border-color: var(--ac)
+        }
+
+        .lsel option {
+            background: var(--surf)
+        }
+
+        .lc {
+            font-size: 11px;
+            color: var(--mu);
+            margin-left: auto
+        }
+
+        .lc span {
+            color: var(--ac)
+        }
+
+        .twrap {
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            overflow: hidden
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse
+        }
+
+        thead tr {
+            background: var(--surf);
+            border-bottom: 1px solid var(--border)
+        }
+
+        th {
+            padding: 8px 11px;
+            text-align: left;
+            font-size: 9px;
+            letter-spacing: .14em;
+            color: var(--mu);
+            text-transform: uppercase;
+            white-space: nowrap;
+            cursor: pointer;
+            user-select: none;
+            transition: color .15s
+        }
+
+        th:hover {
+            color: var(--tx)
+        }
+
+        th.sa::after {
+            content: ' ↑'
+        }
+
+        th.sd::after {
+            content: ' ↓'
+        }
+
+        tbody tr {
+            border-bottom: 1px solid rgba(30, 32, 40, .6);
+            transition: background .1s;
+            cursor: pointer
+        }
+
+        tbody tr:hover {
+            background: rgba(255, 255, 255, .02)
+        }
+
+        tbody tr:last-child {
+            border-bottom: none
+        }
+
+        td {
+            padding: 7px 11px;
+            font-size: 11px;
+            color: var(--tx);
+            max-width: 170px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap
+        }
+
+        td.cc {
+            color: var(--ac);
+            font-weight: 500
+        }
+
+        td.cp {
+            color: var(--gr)
+        }
+
+        td.cr2 {
+            color: var(--ye)
+        }
+
+        td.cw a {
+            color: var(--pu);
+            text-decoration: none
+        }
+
+        td.cw a:hover {
+            text-decoration: underline
+        }
+
+        td.na {
+            color: var(--mu)
+        }
+
+        .exp-row {
+            background: rgba(0, 229, 255, .015) !important
+        }
+
+        .exp-content {
+            padding: 14px 18px;
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 10px
+        }
+
+        .ex-sec {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 5px;
+            padding: 11px
+        }
+
+        .ex-lbl {
+            font-size: 9px;
+            letter-spacing: .14em;
+            color: var(--mu);
+            text-transform: uppercase;
+            margin-bottom: 5px
+        }
+
+        .ex-val {
+            color: var(--tx);
+            line-height: 1.6;
+            word-break: break-word;
+            font-size: 11px
+        }
+
+        .ex-val.ac {
+            color: var(--ac)
+        }
+
+        .ex-val.gr {
+            color: var(--gr)
+        }
+
+        .ex-val.ye {
+            color: var(--ye)
+        }
+
+        .empty {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 50px;
+            color: var(--mu);
+            gap: 8px
+        }
+
+        #toasts {
+            position: fixed;
+            bottom: 18px;
+            right: 18px;
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+            z-index: 9999
+        }
+
+        .toast {
+            background: var(--panel);
+            border: 1px solid var(--b2);
+            border-radius: 5px;
+            padding: 8px 13px;
+            font-size: 11px;
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            animation: tsi .2s ease;
+            max-width: 290px
+        }
+
+        .toast.ok {
+            border-color: rgba(0, 255, 136, .3);
+            color: var(--gr)
+        }
+
+        .toast.er {
+            border-color: rgba(255, 59, 92, .3);
+            color: var(--re)
+        }
+
+        .toast.in {
+            border-color: rgba(0, 229, 255, .3);
+            color: var(--ac)
+        }
+
+        @keyframes tsi {
+            from {
+                transform: translateX(14px);
+                opacity: 0
+            }
+
+            to {
+                transform: translateX(0);
+                opacity: 1
+            }
+        }
+
+        .mover {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, .72);
+            z-index: 500;
+            align-items: center;
+            justify-content: center
+        }
+
+        .mover.open {
+            display: flex
+        }
+
+        .modal {
+            background: var(--panel);
+            border: 1px solid var(--b2);
+            border-radius: 8px;
+            padding: 24px;
+            width: 380px;
+            max-width: 94vw
+        }
+
+        .modal h3 {
+            font-family: 'Syne', sans-serif;
+            font-size: 15px;
+            font-weight: 800;
+            color: #fff;
+            margin-bottom: 16px
+        }
+
+        .fg {
+            margin-bottom: 11px
+        }
+
+        .fl {
+            display: block;
+            font-size: 9px;
+            letter-spacing: .14em;
+            color: var(--mu);
+            text-transform: uppercase;
+            margin-bottom: 5px
+        }
+
+        .fi {
+            width: 100%;
+            background: var(--surf);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 7px 10px;
+            color: var(--tx);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px
+        }
+
+        .fi:focus {
+            outline: none;
+            border-color: var(--ac)
+        }
+
+        .mac {
+            display: flex;
+            gap: 7px;
+            margin-top: 16px
+        }
+
+        .mac .btn {
+            width: auto;
+            flex: 1
+        }
+    </style>
+</head>
+
+<body>
+
+    <header>
+        <div class="logo">
+            <div class="hex"></div>
+            <div class="logo-txt">GN<span>B</span></div>
+        </div>
+        <div class="chip" id="chip">
+            <div class="dot"></div><span id="chipTxt">IDLE</span>
+        </div>
+        <div class="hdr-r">
+            <div class="api-tag">API: <span id="apiDisp">localhost:8000</span></div>
+            <button class="bsm" onclick="openCfg()">⚙ CONFIG</button>
+        </div>
+    </header>
+    <div class="lbar" id="lbar"></div>
+
+    <div class="layout">
+        <aside class="sb">
+            <div class="sb-stats">
+                <div class="sc">
+                    <div class="sv ac" id="sTotal">—</div>
+                    <div class="sl">Total Leads</div>
+                </div>
+                <div class="sc">
+                    <div class="sv gr" id="sCities">—</div>
+                    <div class="sl">Cities Done</div>
+                </div>
+                <div class="sc">
+                    <div class="sv ye" id="sSites">—</div>
+                    <div class="sl">Has Website</div>
+                </div>
+                <div class="sc">
+                    <div class="sv or" id="sPhone">—</div>
+                    <div class="sl">Has Phone</div>
+                </div>
+                <div class="sc full">
+                    <div class="sv" id="sCurrent" style="font-size:12px;color:var(--ye)">IDLE</div>
+                    <div class="sl">Current City</div>
+                </div>
+            </div>
+            <div class="sb-srch">
+                <input type="text" placeholder="Filter cities…" id="citySearch" oninput="renderCities()">
+            </div>
+            <div class="city-list" id="cityList"></div>
+            <div class="sb-btns">
+                <button class="btn btn-go" id="btnStart" onclick="startScraper()">&#9654; START SCRAPER</button>
+                <button class="btn btn-stop" id="btnStop" onclick="stopScraper()" disabled>&#9632; STOP</button>
+                <button class="btn btn-sec" onclick="loadLeads()">&#8595; REFRESH LEADS</button>
+                <button class="btn btn-sec" onclick="exportCSV()">&#8595; EXPORT CSV</button>
+            </div>
+        </aside>
+
+        <main class="main">
+            <div class="tabs">
+                <button class="tab active" id="tLog" onclick="showTab('log')">LIVE LOG</button>
+                <button class="tab" id="tLeads" onclick="showTab('leads')">ALL LEADS</button>
+                <div class="tabs-r">
+                    <div class="prog-wrap">
+                        <div class="prog-bg">
+                            <div class="prog-fill" id="progFill"></div>
+                        </div>
+                        <div class="prog-pct" id="progPct">0%</div>
+                    </div>
+                    <button class="bsm" onclick="clearLog()">CLEAR LOG</button>
+                </div>
+            </div>
+
+            <div class="panel active" id="panelLog">
+                <div class="log-bar">
+                    <label><input type="checkbox" id="autoScroll" checked> AUTO-SCROLL</label>
+                    <label style="margin-left:10px"><input type="checkbox" id="errOnly"
+                            onchange="errOnlyMode=this.checked"> ERRORS ONLY</label>
+                    <span style="font-size:10px;color:var(--mu);margin-left:12px">LINES: <span id="logLines"
+                            style="color:var(--ac)">0</span></span>
+                </div>
+                <div class="log-body" id="logBody">
+                    <div class="log-empty" id="logEmpty">
+                        <div style="font-size:30px;opacity:.2">&#9674;</div>
+                        <div style="font-size:11px;letter-spacing:.1em">WAITING — START SCRAPER OR REFRESH LEADS</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel" id="panelLeads">
+                <div class="leads-body">
+                    <div class="ltbar">
+                        <input class="linput" style="width:200px" type="text" placeholder="Search…" id="lsearch"
+                            oninput="filterLeads()">
+                        <select class="lsel" id="fCity" onchange="filterLeads()">
+                            <option value="">All Cities</option>
+                        </select>
+                        <select class="lsel" id="fPhase" onchange="filterLeads()">
+                            <option value="">All Records</option>
+                            <option value="1">Phase 2 Done</option>
+                            <option value="0">Phase 1 Only</option>
+                        </select>
+                        <select class="lsel" id="fWeb" onchange="filterLeads()">
+                            <option value="">Any Website</option>
+                            <option value="1">Has Website</option>
+                            <option value="0">No Website</option>
+                        </select>
+                        <div class="lc">Showing <span id="lCount">0</span> / <span id="lTotal">0</span></div>
+                    </div>
+                    <div class="twrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th onclick="sortBy('City')">City</th>
+                                    <th onclick="sortBy('Name')">Name</th>
+                                    <th onclick="sortBy('Rating')">Rating</th>
+                                    <th onclick="sortBy('Phone')">Phone</th>
+                                    <th>Address</th>
+                                    <th>Website</th>
+                                    <th>Timings</th>
+                                    <th>Services</th>
+                                    <th>Pricing</th>
+                                    <th onclick="sortBy('Scraped At')">Scraped</th>
+                                </tr>
+                            </thead>
+                            <tbody id="ltbody">
+                                <tr>
+                                    <td colspan="10">
+                                        <div class="empty">
+                                            <div style="font-size:24px;opacity:.2">&#9674;</div>
+                                            <div style="font-size:11px;color:var(--mu)">CLICK REFRESH LEADS TO LOAD DATA
+                                            </div>
+                                        </div>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <div class="mover" id="cfgModal">
+        <div class="modal">
+            <h3>&#9881; Configuration</h3>
+            <div class="fg"><label class="fl">API Base URL</label><input class="fi" id="cfgUrl"
+                    placeholder="http://localhost:8000"></div>
+            <div class="fg"><label class="fl">Poll Interval (ms)</label><input class="fi" id="cfgPoll" type="number"
+                    min="500" value="2000"></div>
+            <div class="fg"><label class="fl">Auto-scroll</label>
+                <select class="fi" id="cfgScroll">
+                    <option value="1">Enabled</option>
+                    <option value="0">Disabled</option>
+                </select>
+            </div>
+            <div class="mac">
+                <button class="btn btn-sec" onclick="closeCfg()">CANCEL</button>
+                <button class="btn btn-go" onclick="saveCfg()">SAVE</button>
+            </div>
+        </div>
+    </div>
+    <div id="toasts"></div>
+
+    <script>
+        const ALL_CITIES = [
+            "Albuquerque", "Anchorage", "Atlanta", "Austin",
+            "Baltimore", "Baton Rouge", "Birmingham", "Boise", "Boston", "Buffalo",
+            "Chandler", "Charlotte", "Chesapeake", "Chula Vista", "Cincinnati", "Clarksville", "Corpus Christi",
+            "Dallas", "Denver", "Des Moines", "Detroit", "Durham",
+            "El Paso", "Fayetteville", "Fort Wayne", "Fort Worth", "Fremont", "Fresno",
+            "Garland", "Gilbert", "Glendale", "Grand Rapids", "Greensboro",
+            "Henderson", "Hialeah", "Honolulu", "Huntington Beach", "Huntsville",
+            "Indianapolis", "Irvine", "Irving",
+            "Jacksonville", "Jersey City",
+            "Kansas City", "Knoxville",
+            "Laredo", "Las Vegas", "Lexington", "Lincoln", "Long Beach", "Louisville", "Lubbock",
+            "Madison", "Memphis", "Mesa", "Miami", "Milwaukee", "Minneapolis", "Modesto", "Montgomery", "Moreno Valley",
+            "Nashville", "New Orleans", "Norfolk", "North Las Vegas",
+            "Oakland", "Oklahoma City", "Omaha", "Orlando", "Oxnard",
+            "Pittsburgh", "Plano", "Portland",
+            "Raleigh", "Reno", "Richmond", "Riverside", "Rochester",
+            "Sacramento", "Saint Paul", "Salt Lake City", "San Antonio", "San Bernardino", "San Diego", "San Francisco", "San Jose",
+            "Santa Ana", "Santa Clarita", "Scottsdale", "Seattle", "Shreveport", "Spokane", "Stockton", "St. Louis", "St. Petersburg", "Syracuse",
+            "Tacoma", "Tallahassee", "Tampa", "Toledo", "Tucson", "Tulsa",
+            "Virginia Beach", "Washington DC", "Wichita", "Winston-Salem", "Worcester", "Yonkers"
+        ];
+
+        let CFG = {
+            url: localStorage.getItem('gnb_url') || 'http://localhost:8000',
+            poll: parseInt(localStorage.getItem('gnb_poll') || '2000'),
+            scroll: localStorage.getItem('gnb_scroll') !== '0'
+        };
+        let running = false, pollTimer = null, logLine = 0;
+        let allLeads = [], filtLeads = [], sortCol = null, sortDir = 1;
+        let cityProg = {}, errOnlyMode = false;
+
+        window.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('apiDisp').textContent = CFG.url.replace(/https?:\/\//, '');
+            document.getElementById('cfgUrl').value = CFG.url;
+            document.getElementById('cfgPoll').value = CFG.poll;
+            document.getElementById('cfgScroll').value = CFG.scroll ? '1' : '0';
+            document.getElementById('autoScroll').checked = CFG.scroll;
+            renderCities();
+            pingStatus();
+            setInterval(pingStatus, 4000);
+        });
+
+        function renderCities() {
+            const q = document.getElementById('citySearch').value.toLowerCase();
+            const list = q ? ALL_CITIES.filter(c => c.toLowerCase().includes(q)) : ALL_CITIES;
+            document.getElementById('cityList').innerHTML = list.map(c => {
+                const p = cityProg[c] || {};
+                const b = p.run ? '<span class="bx run">RUN</span>' : `${p.p1 ? '<span class="bx p1">P1</span>' : '<span class="bx nd">P1</span>'}${p.p2 ? '<span class="bx p2">P2</span>' : '<span class="bx nd">P2</span>'}`;
+                return `<div class="cr"><span class="cn" title="${c}">${c}</span><div class="badges">${b}</div></div>`;
+            }).join('');
+        }
+
+        function applyProgress(rows) {
+            cityProg = {};
+            (rows || []).forEach(r => {
+                if (!cityProg[r.city]) cityProg[r.city] = { p1: false, p2: false, run: false };
+                if (r.phase === 'phase1' && r.status === 'completed') cityProg[r.city].p1 = true;
+                if (r.phase === 'phase2' && r.status === 'completed') cityProg[r.city].p2 = true;
+                if (r.status === 'in_progress') cityProg[r.city].run = true;
+            });
+            renderCities();
+            const done = ALL_CITIES.filter(c => cityProg[c]?.p1 && cityProg[c]?.p2).length;
+            const pct = Math.round(done / ALL_CITIES.length * 100);
+            document.getElementById('progFill').style.width = pct + '%';
+            document.getElementById('progPct').textContent = pct + '%';
+        }
+
+        async function call(path, opts = {}) {
+            const r = await fetch(CFG.url + path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        }
+
+        async function pingStatus() {
+            try {
+                const d = await call('/status');
+                setRunning(d.running);
+                if (d.current_city) document.getElementById('sCurrent').textContent = d.current_city;
+                if (d.progress) applyProgress(d.progress);
+                if (d.stats) {
+                    document.getElementById('sTotal').textContent = d.stats.total ?? '—';
+                    document.getElementById('sCities').textContent = d.stats.cities ?? '—';
+                    document.getElementById('sSites').textContent = d.stats.websites ?? '—';
+                    document.getElementById('sPhone').textContent = d.stats.phones ?? '—';
+                }
+            } catch { }
+        }
+
+        async function startScraper() {
+            try { await call('/scraper/start', { method: 'POST' }); setRunning(true); logLine = 0; startPoll(); toast('Scraper started', 'ok'); }
+            catch (e) { toast('Start failed: ' + e.message, 'er'); }
+        }
+
+        async function stopScraper() {
+            try { await call('/scraper/stop', { method: 'POST' }); setRunning(false); stopPoll(); toast('Scraper stopped', 'in'); }
+            catch (e) { toast('Stop failed: ' + e.message, 'er'); setRunning(false); stopPoll(); }
+        }
+
+        async function pollLogs() {
+            try {
+                const d = await call('/logs?since=' + logLine + '&limit=300');
+                if (d.lines?.length) { d.lines.forEach(appendLog); logLine = d.next_line; }
+                document.getElementById('logLines').textContent = logLine;
+                if (d.progress) applyProgress(d.progress);
+                if (d.stats?.total) document.getElementById('sTotal').textContent = d.stats.total;
+                if (d.stats?.current_city) document.getElementById('sCurrent').textContent = d.stats.current_city;
+                if (!d.running && running) { setRunning(false); stopPoll(); loadLeads(); toast('Scraper finished!', 'ok'); }
+            } catch { }
+        }
+
+        async function loadLeads() {
+            setLoad(true);
+            try {
+                const d = await call('/leads');
+                allLeads = d; updateStats(d); buildCityFilter(d); filterLeads();
+                toast(d.length + ' leads loaded', 'ok');
+            } catch (e) { toast('Load failed: ' + e.message, 'er'); }
+            finally { setLoad(false); }
+        }
+
+        function appendLog(raw) {
+            const empty = document.getElementById('logEmpty');
+            if (empty) empty.remove();
+            const body = document.getElementById('logBody');
+            const m = raw.match(/^(\d{4}-\d{2}-\d{2} (\d{2}:\d{2}:\d{2}))[,\d]*\s*\|\s*(\w+)\s*\|\s*(.+)$/);
+            if (!m) {
+                if (errOnlyMode) return;
+                const d = document.createElement('div'); d.className = 'le';
+                d.innerHTML = '<div class="l-msg em" style="padding-left:152px">' + esc(raw) + '</div>';
+                body.appendChild(d); scr(body); return;
+            }
+            const [, , time, lv, msg] = m;
+            if (errOnlyMode && lv !== 'ERROR') return;
+            if (/PHASE [12] (START|DONE)|BATCH \d|={5,}|#{5,}/.test(msg)) {
+                if (/={5,}|#{5,}/.test(msg) && !/PHASE|BATCH|START|DONE/.test(msg)) return;
+                const d = document.createElement('div');
+                d.className = 'log-div' + (msg.includes('PHASE 2') ? ' p2' : msg.includes('BATCH') ? ' bat' : '');
+                d.textContent = '+ ' + msg.replace(/[=\-#]+/g, '').trim();
+                body.appendChild(d); scr(body); return;
+            }
+            const isOk = msg.startsWith('✓');
+            const d = document.createElement('div'); d.className = 'le';
+            d.innerHTML =
+                '<div class="l-ts">' + time + '</div>' +
+                '<div class="l-lv ' + (isOk ? 'OK' : lv === 'WARNING' ? 'WARN' : lv) + '">' + (isOk ? 'OK' : lv === 'WARNING' ? 'WARN' : lv) + '</div>' +
+                '<div class="l-msg ' + (lv === 'ERROR' ? 'em' : lv === 'WARNING' ? 'wm' : isOk ? 'gm' : '') + '">' + esc(msg) + '</div>';
+            body.appendChild(d); scr(body);
+        }
+
+        function scr(el) { if (document.getElementById('autoScroll').checked) el.scrollTop = el.scrollHeight; }
+        function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+        function clearLog() {
+            logLine = 0;
+            document.getElementById('logLines').textContent = '0';
+            document.getElementById('logBody').innerHTML = '<div class="log-empty" id="logEmpty"><div style="font-size:30px;opacity:.2">&#9674;</div><div style="font-size:11px;letter-spacing:.1em">LOG CLEARED</div></div>';
+        }
+
+        function renderLeads(data) {
+            document.getElementById('lCount').textContent = data.length;
+            const tb = document.getElementById('ltbody');
+            if (!data.length) {
+                tb.innerHTML = '<tr><td colspan="10"><div class="empty"><div style="font-size:24px;opacity:.2">&#9674;</div><div style="font-size:11px;color:var(--mu)">NO LEADS MATCH</div></div></td></tr>';
+                return;
+            }
+            tb.innerHTML = data.map((r, i) => {
+                const web = r.Website && r.Website !== 'N/A' ? '<a href="' + r.Website + '" target="_blank" rel="noopener">' + r.Website.replace(/https?:\/\/(www\.)?/, '').slice(0, 26) + '</a>' : '<span class="na">—</span>';
+                return '<tr onclick="toggleRow(this,' + i + ')">'
+                    + '<td class="cc">' + (r.City || '—') + '</td>'
+                    + '<td title="' + (r.Name || '') + '">' + (r.Name || '—') + '</td>'
+                    + '<td class="cr2">' + (r.Rating && r.Rating !== 'N/A' ? '&#9733; ' + r.Rating : '<span class="na">—</span>') + '</td>'
+                    + '<td class="cp">' + (r.Phone && r.Phone !== 'N/A' ? r.Phone : '<span class="na">—</span>') + '</td>'
+                    + '<td title="' + (r.Address || '') + '">' + (r.Address && r.Address !== 'N/A' ? r.Address : '<span class="na">—</span>') + '</td>'
+                    + '<td class="cw">' + web + '</td>'
+                    + '<td>' + (r.Timings && r.Timings !== 'N/A' ? r.Timings.split('|')[0].slice(0, 22) + '…' : '<span class="na">—</span>') + '</td>'
+                    + '<td title="' + (r.services || '') + '">' + (r.services && r.services !== 'N/A' ? r.services.split(';').slice(0, 2).join(', ').slice(0, 30) + (r.services.split(';').length > 2 ? '…' : '') : '<span class="na">—</span>') + '</td>'
+                    + '<td title="' + (r.pricing || '') + '">' + (r.pricing && r.pricing !== 'N/A' ? r.pricing.slice(0, 28) + (r.pricing.length > 28 ? '…' : '') : '<span class="na">—</span>') + '</td>'
+                    + '<td>' + (r['Scraped At'] ? String(r['Scraped At']).slice(0, 10) : '—') + '</td>'
+                    + '</tr>';
+            }).join('');
+        }
+
+        function toggleRow(tr, idx) {
+            const nx = tr.nextElementSibling;
+            if (nx && nx.classList.contains('exp-row')) { nx.remove(); return; }
+            document.querySelectorAll('.exp-row').forEach(r => r.remove());
+            const r = filtLeads[idx]; if (!r) return;
+            const row = document.createElement('tr'); row.className = 'exp-row';
+            row.innerHTML = '<td colspan="10"><div class="exp-content">'
+                + '<div class="ex-sec"><div class="ex-lbl">Name</div><div class="ex-val ac">' + (r.Name || '—') + '</div>'
+                + '<div class="ex-lbl" style="margin-top:9px">Address</div><div class="ex-val">' + (r.Address || '—') + '</div>'
+                + '<div class="ex-lbl" style="margin-top:9px">Phone</div><div class="ex-val gr">' + (r.Phone || '—') + '</div>'
+                + '<div class="ex-lbl" style="margin-top:9px">Rating</div><div class="ex-val ye">' + (r.Rating || '—') + '</div>'
+                + '<div class="ex-lbl" style="margin-top:9px">Website</div><div class="ex-val">' + (r.Website && r.Website !== 'N/A' ? '<a href="' + r.Website + '" target="_blank" style="color:var(--pu)">' + r.Website + '</a>' : 'N/A') + '</div></div>'
+                + '<div class="ex-sec"><div class="ex-lbl">Opening Hours</div><div class="ex-val">' + (r.Timings || 'N/A').split('|').map(t => '<div>' + t.trim() + '</div>').join('') + '</div>'
+                + '<div class="ex-lbl" style="margin-top:9px">Logo</div><div class="ex-val">' + (r.logo_url && r.logo_url !== 'N/A' ? '<a href="' + r.logo_url + '" target="_blank" style="color:var(--ac);font-size:10px">View Logo &#8599;</a>' : 'N/A') + '</div>'
+                + '<div class="ex-lbl" style="margin-top:9px">Scraped At</div><div class="ex-val" style="color:var(--mu)">' + (r['Scraped At'] || '—') + '</div></div>'
+                + '<div class="ex-sec"><div class="ex-lbl">Services (Phase 2)</div><div class="ex-val">' + (r.services && r.services !== 'N/A' ? r.services.split(';').map(s => '<div style="margin-bottom:2px">• ' + s.trim() + '</div>').join('') : '<span style="color:var(--mu)">Phase 2 not scraped yet</span>') + '</div>'
+                + '<div class="ex-lbl" style="margin-top:9px">Pricing (Phase 2)</div><div class="ex-val gr">' + (r.pricing && r.pricing !== 'N/A' ? r.pricing : '<span style="color:var(--mu)">—</span>') + '</div></div>'
+                + '</div></td>';
+            tr.after(row);
+        }
+
+        function filterLeads() {
+            const q = document.getElementById('lsearch').value.toLowerCase();
+            const city = document.getElementById('fCity').value;
+            const ph = document.getElementById('fPhase').value;
+            const web = document.getElementById('fWeb').value;
+            filtLeads = allLeads.filter(r => {
+                if (city && r.City !== city) return false;
+                if (ph === '1' && (!r.logo_url || r.logo_url === 'N/A')) return false;
+                if (ph === '0' && r.logo_url && r.logo_url !== 'N/A') return false;
+                if (web === '1' && (!r.Website || r.Website === 'N/A')) return false;
+                if (web === '0' && r.Website && r.Website !== 'N/A') return false;
+                if (q && !`${r.City} ${r.Name} ${r.Phone} ${r.Address}`.toLowerCase().includes(q)) return false;
+                return true;
+            });
+            if (sortCol) filtLeads.sort((a, b) => String(a[sortCol] || '').localeCompare(String(b[sortCol] || '')) * sortDir);
+            renderLeads(filtLeads);
+        }
+
+        function sortBy(col) {
+            sortDir = (sortCol === col) ? -sortDir : 1; sortCol = col;
+            document.querySelectorAll('th').forEach(th => {
+                th.classList.remove('sa', 'sd');
+                if (th.textContent.replace(/ [↑↓]/, '').trim().toLowerCase() === col.toLowerCase()) th.classList.add(sortDir === 1 ? 'sa' : 'sd');
+            });
+            filterLeads();
+        }
+
+        function buildCityFilter(data) {
+            const cities = [...new Set(data.map(r => r.City).filter(Boolean))].sort();
+            document.getElementById('fCity').innerHTML = '<option value="">All Cities</option>' + cities.map(c => '<option value="' + c + '">' + c + '</option>').join('');
+        }
+
+        function updateStats(data) {
+            document.getElementById('sTotal').textContent = data.length;
+            document.getElementById('sCities').textContent = new Set(data.map(r => r.City)).size;
+            document.getElementById('sSites').textContent = data.filter(r => r.Website && r.Website !== 'N/A').length;
+            document.getElementById('sPhone').textContent = data.filter(r => r.Phone && r.Phone !== 'N/A').length;
+            document.getElementById('lTotal').textContent = data.length;
+        }
+
+        function exportCSV() {
+            const data = filtLeads.length ? filtLeads : allLeads;
+            if (!data.length) { toast('No leads', 'er'); return; }
+            const keys = Object.keys(data[0]);
+            const csv = [keys.join(','), ...data.map(r => keys.map(k => '"' + String(r[k] || '').replace(/"/g, '""') + '"').join(','))].join('\n');
+            const a = document.createElement('a');
+            a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+            a.download = 'gnb_leads_' + new Date().toISOString().slice(0, 10) + '.csv';
+            a.click(); toast('Exported ' + data.length + ' leads', 'ok');
+        }
+
+        function showTab(t) {
+            document.getElementById('tLog').className = 'tab' + (t === 'log' ? ' active' : '');
+            document.getElementById('tLeads').className = 'tab' + (t === 'leads' ? ' active' : '');
+            document.getElementById('panelLog').className = 'panel' + (t === 'log' ? ' active' : '');
+            document.getElementById('panelLeads').className = 'panel' + (t === 'leads' ? ' active' : '');
+            if (t === 'leads' && !allLeads.length) loadLeads();
+        }
+
+        function setRunning(v) {
+            running = v;
+            document.getElementById('chip').className = 'chip' + (v ? ' on' : '');
+            document.getElementById('chipTxt').textContent = v ? 'RUNNING' : 'IDLE';
+            document.getElementById('btnStart').disabled = v;
+            document.getElementById('btnStop').disabled = !v;
+            document.getElementById('lbar').classList.toggle('on', v);
+        }
+        function setLoad(v) { document.getElementById('lbar').classList.toggle('on', v); }
+        function startPoll() { if (pollTimer) clearInterval(pollTimer); pollTimer = setInterval(pollLogs, CFG.poll); }
+        function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+        function openCfg() { document.getElementById('cfgModal').classList.add('open'); }
+        function closeCfg() { document.getElementById('cfgModal').classList.remove('open'); }
+        function saveCfg() {
+            CFG.url = document.getElementById('cfgUrl').value.trim().replace(/\/$/, '');
+            CFG.poll = parseInt(document.getElementById('cfgPoll').value) || 2000;
+            CFG.scroll = document.getElementById('cfgScroll').value === '1';
+            localStorage.setItem('gnb_url', CFG.url);
+            localStorage.setItem('gnb_poll', CFG.poll);
+            localStorage.setItem('gnb_scroll', CFG.scroll ? '1' : '0');
+            document.getElementById('apiDisp').textContent = CFG.url.replace(/https?:\/\//, '');
+            document.getElementById('autoScroll').checked = CFG.scroll;
+            closeCfg(); toast('Saved', 'ok');
+            if (running) { stopPoll(); startPoll(); }
+        }
+
+        function toast(msg, type) {
+            const el = document.createElement('div');
+            el.className = 'toast ' + type;
+            el.innerHTML = '<span>' + ({ ok: '✓', er: '✕', in: '◈' }[type] || '◈') + '</span><span>' + msg + '</span>';
+            document.getElementById('toasts').appendChild(el);
+            setTimeout(() => el.remove(), 3000);
+        }
+    </script>
+</body>
+
+</html>
