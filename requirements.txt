@@ -6,5 +6,4 @@ selenium
 undetected-chromedriver
 beautifulsoup4
 requests
-pyngrok
-
+python-dotenv

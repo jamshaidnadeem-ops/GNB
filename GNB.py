@@ -10,6 +10,8 @@ import re
 import os
 from datetime import datetime
 import sys
+from bs4 import BeautifulSoup
+
 try:
     import pymysql
     from pymysql import Error
@@ -77,7 +79,7 @@ PAGE_LOAD_DELAY = 4
 # OFF-SCREEN to a large negative coordinate. Chrome still thinks it is "visible"
 # so lazy-load, Intersection Observers, and JS timers all keep firing normally.
 # Set HEADLESS = True only for server/deployment (no display at all).
-HEADLESS = os.environ.get('HEADLESS', 'True').lower() == 'true'
+HEADLESS = True
 WINDOW_WIDTH  = 1920
 WINDOW_HEIGHT = 1080
 # Off-screen position — browser is "open" but behind / off your monitor
@@ -106,7 +108,7 @@ logging.basicConfig(
 # DRIVER
 # =========================
 def start_driver():
-    """Initialize undetected Chrome driver optimised for background use."""
+    """Initialize undetected Chrome driver optimised for background use with enhanced stealth."""
     import undetected_chromedriver as uc
     options = uc.ChromeOptions()
 
@@ -115,9 +117,17 @@ def start_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
 
+    # High-level stealth: Mask headless-specific features
+    # These help bypass detection based on browser behavior differences
+    options.add_argument("--disable-infobars")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-notifications")
+    options.add_argument("--no-default-browser-check")
+    options.add_argument("--no-first-run")
+    options.add_argument("--ignore-certificate-errors")
+    options.add_argument("--password-store=basic")
+
     # Keep Chrome fully active even when off-screen / not focused.
-    # These flags prevent Chrome from throttling timers, pausing rendering,
-    # or sleeping background tabs — which is what causes the "minimized" bug.
     options.add_argument("--disable-background-timer-throttling")
     options.add_argument("--disable-backgrounding-occluded-windows")
     options.add_argument("--disable-renderer-backgrounding")
@@ -129,53 +139,125 @@ def start_driver():
     options.add_argument("--metrics-recording-only")
     options.add_argument("--mute-audio")
 
-    # Force a fixed virtual viewport so Intersection Observers always fire.
-    # KEY FIX: Chrome lazy-load uses IntersectionObserver which requires elements
-    # to be "in viewport". Moving the window off-screen (not minimizing) keeps
-    # the viewport real so all IO callbacks still fire.
+    # Set Window UI properties
     options.add_argument(f"--window-size={WINDOW_WIDTH},{WINDOW_HEIGHT}")
     options.add_argument(f"--window-position={OFFSCREEN_X},{OFFSCREEN_Y}")
     options.add_argument("--force-device-scale-factor=1")
+    options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
 
     if HEADLESS:
+        # Use new headless mode which is more like a real browser
         options.add_argument("--headless=new")
         options.add_argument("--disable-gpu")
+        # Mask the User-Agent if in headless to avoid 'HeadlessChrome'
+        # UC usually handles this but we'll already set it globally above
     else:
-        # Off-screen but NOT headless: GPU compositing stays on so
-        # Intersection Observer sees a real painted viewport.
         options.add_argument("--use-gl=angle")
         options.add_argument("--use-angle=swiftshader")
 
     options.page_load_strategy = 'eager'
 
+    # Try to detect version to avoid mismatch
+    version_main = None
     try:
-        # Use auto-detection by default for better compatibility on Railway/Linux
-        driver = uc.Chrome(options=options, use_subprocess=True)
+        import winreg
+        for reg_path in [
+            (winreg.HKEY_CURRENT_USER,  r"Software\Google\Chrome\BLBeacon"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Google\Chrome\BLBeacon"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Google\Chrome\BLBeacon"),
+        ]:
+            try:
+                key = winreg.OpenKey(reg_path[0], reg_path[1])
+                v, _ = winreg.QueryValueEx(key, "version")
+                version_main = int(v.split('.')[0])
+                logging.info(f"Detected Chrome version: {version_main}")
+                break
+            except Exception:
+                continue
+    except:
+        pass
+
+    try:
+        driver = uc.Chrome(options=options, use_subprocess=True, version_main=version_main)
     except Exception as e:
-        logging.error(f"Failed to initialize driver: {e}")
-        raise e
+        if "version" in str(e).lower() or "session not created" in str(e).lower():
+            logging.warning(f"Version mismatch detected? Retrying with explicit version fallback... {e}")
+            try:
+                driver = uc.Chrome(options=options, use_subprocess=True, version_main=145)
+            except:
+                raise e
+        else:
+            logging.error(f"Failed to initialize driver: {e}")
+            raise e
 
     driver.set_page_load_timeout(60)
     driver.set_script_timeout(60)
 
+    # Patch __del__ to prevent errors during cleanup
     if hasattr(driver, "__del__"):
         driver.__del__ = lambda *args, **kwargs: None
 
-    # Remove webdriver flag via CDP
-    driver.execute_cdp_cmd(
-        "Page.addScriptToEvaluateOnNewDocument",
-        {"source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"}
-    )
+    # BLOCK 1: CDP-based Stealth Overrides
+    # This is the most effective way to mask headless mode.
+    # We patch navigator properties that anti-bot scripts (like Akamai, DataDome) check.
+    stealth_script = """
+    (() => {
+        // 1. Remove webdriver flag
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 
-    # Ensure window is positioned off-screen (belt-and-suspenders)
+        // 2. Set languages and platform to common Windows values
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+        Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+
+        // 3. Mock window.chrome (headless usually lacks this)
+        window.chrome = {
+            runtime: {},
+            loadTimes: function() {},
+            csi: function() {},
+            app: {}
+        };
+
+        // 4. Mock Permissions
+        const originalQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (parameters) => (
+            parameters.name === 'notifications' ?
+                Promise.resolve({ state: Notification.permission }) :
+                originalQuery(parameters)
+        );
+
+        // 5. WebGL Vendor/Renderer (avoid SwiftShader/Mesa)
+        const getParameter = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function(parameter) {
+            if (parameter === 37445) return 'Intel Inc.';
+            if (parameter === 37446) return 'Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0';
+            return getParameter.apply(this, arguments);
+        };
+    })();
+    """
+    try:
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": stealth_script})
+    except Exception as e:
+        logging.warning(f"Failed to apply expanded stealth CDP: {e}")
+
+    # Patch quit to avoid WinError 6 on Windows
+    original_quit = driver.quit
+    def patched_quit():
+        try:
+            original_quit()
+        except OSError as e:
+            if "WinError 6" not in str(e):
+                raise
+    driver.quit = patched_quit
+
     if not HEADLESS:
         try:
             driver.set_window_rect(x=OFFSCREEN_X, y=OFFSCREEN_Y,
                                    width=WINDOW_WIDTH, height=WINDOW_HEIGHT)
         except Exception:
-            pass  # Some OSes ignore negative coords — the flags handle it
+            pass
 
     return driver
+
 
 
 def js(driver, script, *args):
@@ -222,9 +304,10 @@ DB_CONFIG = {
     'password': os.environ.get('DB_PASSWORD', ''),
     'database': os.environ.get('DB_NAME', 'defaultdb'),
     'charset':  'utf8mb4',
-    'connect_timeout': 30,
-    'read_timeout':    30,
-    'write_timeout':   30
+    'connect_timeout': 60,
+    'read_timeout':    60,
+    'write_timeout':   60,
+    'autocommit':      True
 }
 TABLE_NAME = 'car_detailers'
 
@@ -265,7 +348,9 @@ def init_database():
             Phone VARCHAR(50),
             Website TEXT,
             Timings TEXT,
+            reviews TEXT,
             logo_url TEXT,
+            about_us TEXT,
             services TEXT,
             pricing TEXT,
             `Scraped At` DATETIME,
@@ -273,6 +358,13 @@ def init_database():
             UNIQUE KEY unique_business (City, Name)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """)
+        # Check if columns exist (for existing DBs)
+        cursor.execute(f"SHOW COLUMNS FROM {TABLE_NAME} LIKE 'reviews'")
+        if not cursor.fetchone():
+            cursor.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN reviews TEXT AFTER Timings")
+        cursor.execute(f"SHOW COLUMNS FROM {TABLE_NAME} LIKE 'about_us'")
+        if not cursor.fetchone():
+            cursor.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN about_us TEXT AFTER logo_url")
 
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS scraper_progress (
@@ -366,34 +458,30 @@ def check_duplicate(connection, city, name):
         return False
 
 
-def save_google_maps_data(city, name, rating, address, phone, website, timings, scraped_at):
-    connection = None
+def save_google_maps_data(connection, city, name, rating, address, phone, website, timings, data, scraped_at):
+    """
+    Saves data using an EXISTING connection to reduce handshake overhead and timeout errors.
+    """
+    if not connection:
+        return False
     try:
-        connection = get_db_connection()
-        if not connection:
-            return False
         if check_duplicate(connection, city, name):
             return False
         cursor = connection.cursor()
         cursor.execute(f"""
         INSERT INTO {TABLE_NAME}
-        (City, Name, Rating, Address, Phone, Website, Timings, logo_url, services, pricing, `Scraped At`)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        """, (city, name, rating, address, phone, website, timings, "N/A", "N/A", "N/A", scraped_at))
-        connection.commit()
+        (City, Name, Rating, Address, Phone, Website, Timings, reviews, logo_url, about_us, services, pricing, `Scraped At`)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (city, name, rating, address, phone, website, timings, data.get('reviews', 'N/A'), "N/A", "N/A", "N/A", "N/A", scraped_at))
+        # Autocommit is enabled in config, so no need for manual connection.commit()
         cursor.close()
         return True
     except Error as e:
         logging.error(f"Error saving data: {e}")
-        if connection:
-            connection.rollback()
         return False
-    finally:
-        if connection:
-            connection.close()
 
 
-def update_website_data(city, name, logo_url, services, pricing):
+def update_website_data(city, name, logo_url, about_us, services, pricing):
     connection = None
     try:
         if logo_url == "N/A" and services == "N/A" and pricing == "N/A":
@@ -403,9 +491,9 @@ def update_website_data(city, name, logo_url, services, pricing):
             return False
         cursor = connection.cursor()
         cursor.execute(f"""
-        UPDATE {TABLE_NAME} SET logo_url=%s, services=%s, pricing=%s
+        UPDATE {TABLE_NAME} SET logo_url=%s, about_us=%s, services=%s, pricing=%s
         WHERE City=%s AND Name=%s
-        """, (logo_url, services, pricing, city, name))
+        """, (logo_url, about_us, services, pricing, city, name))
         if cursor.rowcount > 0:
             connection.commit()
             cursor.close()
@@ -485,30 +573,45 @@ def clean_and_validate_url(url):
 # =========================
 def extract_name(driver):
     for by, sel in [
-        (By.CSS_SELECTOR, "h1.DUwDvf.lfPIob"),
+        (By.CSS_SELECTOR, "h1.DUwDvf"),
+        (By.CSS_SELECTOR, "h1.LFB9uc"),
         (By.CSS_SELECTOR, "div.fontHeadlineLarge"),
-        (By.CSS_SELECTOR, "div.lP3y9d"),
-        (By.XPATH, "//h1[contains(@class,'DUwDvf')]"),
+        (By.CSS_SELECTOR, "h1.DUwDvf.lfPIob")
     ]:
         try:
             el = driver.find_element(by, sel)
             text = js(driver, "return arguments[0].textContent", el).strip()
-            if text and text != "N/A":
-                return text
-        except:
-            pass
+            if text: return text
+        except: pass
     return "N/A"
 
 
 def extract_address(driver):
+    """
+    Extract the physical address of the business.
+    Filters out phone numbers.
+    """
     for by, sel in [
-        (By.CSS_SELECTOR, "div.Io6YTe.fontBodyMedium.kR99db.fdkmkc"),
+        # Priority 1: Explicit address button (most reliable)
         (By.XPATH, "//button[contains(@data-item-id,'address')]//div[contains(@class,'Io6YTe')]"),
+        # Priority 2: Container with aria-label
+        (By.XPATH, "//div[contains(@aria-label, 'Address')]"),
+        # Priority 3: Generic info div
+        (By.CSS_SELECTOR, "div.Io6YTe.fontBodyMedium.kR99db.fdkmkc"),
     ]:
         try:
-            el = driver.find_element(by, sel)
-            text = js(driver, "return arguments[0].textContent", el).strip()
-            if text:
+            elements = driver.find_elements(by, sel)
+            for el in elements:
+                text = js(driver, "return arguments[0].textContent", el).strip()
+                if not text or len(text) < 5:
+                    continue
+                
+                # Skip if it looks like a phone number 
+                # (e.g., "+1 907-854-4204" or "907-854-4204")
+                digits_only = re.sub(r'\D', '', text)
+                if len(digits_only) >= 7 and re.match(r'^[\+\s\d\-\(\).]{7,25}$', text):
+                    continue
+
                 return text
         except:
             pass
@@ -547,27 +650,317 @@ def extract_website(driver):
 
 
 def extract_rating(driver):
+    """
+    Extract the main business rating from the detail panel header.
+    Uses the Name H1 as an anchor to ensure we are in the right panel.
+    """
     try:
-        for container in driver.find_elements(By.CSS_SELECTOR, "div.F7nice"):
-            text = js(driver, "return arguments[0].textContent", container).strip().split('\n')[0].strip()
-            if re.match(r'^\d+\.\d+$', text):
-                return text
-    except:
-        pass
-    try:
-        el = driver.find_element(By.CSS_SELECTOR, "span[role='img'][aria-label*='stars']")
-        m = re.search(r'(\d+\.\d+)', el.get_attribute("aria-label") or "")
-        if m:
-            return m.group(1)
-    except:
-        pass
+        # 1. Target the detail panel header where the name and rating coexist
+        # h1.DUwDvf is the business name. The rating is usually a sibling or nearby.
+        try:
+            name_h1 = driver.find_element(By.CSS_SELECTOR, "h1.DUwDvf")
+            # Go up to the header section (usually 2-3 levels up)
+            header = js(driver, "return arguments[0].closest('.TIH4s') || arguments[0].parentElement.parentElement", name_h1)
+            
+            if header:
+                # Search for F7nice specifically in this header
+                containers = header.find_elements(By.CSS_SELECTOR, "div.F7nice")
+                for c in containers:
+                    text = js(driver, "return arguments[0].textContent", c).strip()
+                    m = re.search(r'(\d\.\d)', text)
+                    if m:
+                        rating = m.group(1)
+                        logging.debug(f"Rating found via H1 anchor: {rating}")
+                        return rating
+        except:
+            pass
+
+        # 2. Global search but strictly EXCLUDING the sidebar list
+        # Sidebar cards have class 'Nv2PK' or 'jNb09'
+        all_ratings = driver.find_elements(By.CSS_SELECTOR, "div.F7nice")
+        for container in all_ratings:
+            try:
+                # Use JS to check if this element is inside the sidebar list
+                is_in_sidebar = js(driver, """
+                    var el = arguments[0];
+                    while (el && el !== document.body) {
+                        if (el.classList.contains('Nv2PK') || 
+                            el.classList.contains('jNb09') || 
+                            el.getAttribute('role') === 'article') return true;
+                        el = el.parentElement;
+                    }
+                    return false;
+                """, container)
+                
+                if not is_in_sidebar:
+                    text = js(driver, "return arguments[0].textContent", container).strip()
+                    m = re.search(r'(\d\.\d)', text)
+                    if m: return m.group(1)
+            except: continue
+
+        # 3. Last resort: specific aria-label star search (excluding sidebar)
+        stars = driver.find_elements(By.CSS_SELECTOR, "span[role='img'][aria-label*='stars']")
+        for s in stars:
+            try:
+                is_in_sidebar = js(driver, "return !!arguments[0].closest('.Nv2PK, [role=\"article\"]')", s)
+                if not is_in_sidebar:
+                    label = s.get_attribute("aria-label") or ""
+                    m = re.search(r'(\d\.\d)', label)
+                    if m: return m.group(1)
+            except: continue
+
+    except Exception as e:
+        logging.debug(f"Rating extraction error: {e}")
+        
     return "N/A"
 
 
-def extract_timings(driver):
+def extract_reviews(driver):
     """
-    Extract opening hours. All DOM reads use JS so they work off-screen.
+    Extract up to 5 reviews from the Maps detail panel.
+    Tries to click the Reviews tab via JS first (works in headless).
+    Falls back to scrolling the panel if tab click fails.
+    Extracted with multiple fallback detection for 'Lite' mode maps.
     """
+    try:
+        # Step 1: Try clicking the Reviews tab via JS
+        clicked = False
+        try:
+            # Method A: Try by aria-label (Best for standard UI)
+            all_btns = driver.find_elements(By.XPATH, "//button[@aria-label]")
+            for b in all_btns:
+                label = (b.get_attribute("aria-label") or "").lower()
+                if "review" in label and "write" not in label and "disclosure" not in label and "learn more" not in label:
+                    js(driver, "arguments[0].click()", b)
+                    clicked = True
+                    logging.info(f"Reviews tab clicked via label: {label[:60]}")
+                    time.sleep(2)
+                    break
+            
+            if not clicked:
+                # Method B: Try direct text search in tabs (Lite mode fallback)
+                tabs = driver.find_elements(By.CSS_SELECTOR, "div[role='tablist'] button")
+                for t in tabs:
+                    text = js(driver, "return arguments[0].textContent", t).strip()
+                    if "Reviews" in text:
+                        js(driver, "arguments[0].click()", t)
+                        clicked = True
+                        logging.info(f"Reviews tab clicked via text: {text}")
+                        time.sleep(2)
+                        break
+
+            if not clicked:
+                # Method C: Click the rating value itself (Last resort)
+                rating_links = driver.find_elements(By.CSS_SELECTOR, "span[aria-label*='reviews']")
+                for rl in rating_links:
+                    js(driver, "arguments[0].click()", rl)
+                    clicked = True
+                    logging.info("Clicked rating link for reviews fallback.")
+                    time.sleep(2)
+                    break
+        except Exception as e:
+            logging.warning(f"Error clicking reviews tab: {e}")
+            
+        if clicked:
+            # Settle delay
+            time.sleep(4)
+        else:
+            logging.info("Reviews tab not found or already active. Attempting extraction anyway.")
+
+        # Step 2: Scroll the panel to load cards
+        panel = None
+        for sel in [
+            "div.m6QErb.DxyBCb.kA9KIf.dS8AEf",
+            "div.m6QErb.DxyBCb",
+            "div.m6QErb",
+            "div[role='main']",
+        ]:
+            try:
+                el = driver.find_element(By.CSS_SELECTOR, sel)
+                if el:
+                    panel = el
+                    break
+            except:
+                pass
+
+        if panel:
+            for i in range(1, 8):
+                js(driver, "arguments[0].scrollTop += 500", panel)
+                js(driver, "arguments[0].dispatchEvent(new Event('scroll', {bubbles:true}))", panel)
+                time.sleep(0.5)
+            time.sleep(2)
+
+        # Step 3: Parse review cards
+        reviews = []
+        cards = driver.find_elements(By.CSS_SELECTOR, "div.jftiEf")
+        
+        logging.info(f"Review cards found: {len(cards)}")
+
+        for card in cards[:5]:
+            try:
+                # 1. Name
+                name = js(driver, """
+                    var n = arguments[0].querySelector('.d4r55') || 
+                            arguments[0].querySelector('.fontTitleMedium') || 
+                            arguments[0].querySelector('.TSZ61b');
+                    return n ? n.textContent : "User";
+                """, card)
+
+                # 2. Comment
+                text = js(driver, """
+                    var t = arguments[0].querySelector('.wiI7pd') || 
+                            arguments[0].querySelector('.MyEned') || 
+                            arguments[0].querySelector('.K70oJc');
+                    return t ? t.textContent : "";
+                """, card)
+
+                # 3. Rating
+                rating = js(driver, "return (arguments[0].querySelector('.kv7ab1') || {}).ariaLabel", card) or \
+                         js(driver, "return (arguments[0].querySelector('.kvMYJc') || {}).ariaLabel", card) or ""
+                
+                if text:
+                    reviews.append(f"{name.strip()} ({rating.strip()}): {text.strip()}")
+            except:
+                pass
+
+        # Step 4: Back to Overview
+        try:
+            overview_btn = driver.find_element(By.CSS_SELECTOR, "button[aria-label*='Overview'], [data-tab-index='0']")
+            js(driver, "arguments[0].click()", overview_btn)
+            time.sleep(1)
+        except:
+            pass
+
+        if reviews:
+            return " | ".join(reviews)
+
+    except Exception as e:
+        logging.warning(f"Error extracting reviews: {e}")
+    return "N/A"
+
+
+
+
+
+def _extract_timings_from_website(driver, website_url):
+    """
+    Fallback: navigate to the business website, scroll to footer,
+    and extract opening hours using keyword + day-pattern regex matching.
+    Navigates back to the Maps page after extraction so panel state is restored.
+    """
+    if not website_url or website_url == "N/A":
+        return []
+    try:
+        current_url = driver.current_url
+        
+        # Set a shorter timeout specifically for external websites to prevent renderer hangs
+        driver.set_page_load_timeout(35) 
+        
+        try:
+            driver.get(website_url)
+        except Exception as e:
+            if "timeout" in str(e).lower():
+                logging.warning(f"Website load timed out for {website_url}, attempting to extract partial data...")
+            else:
+                raise e
+
+        time.sleep(2)
+        # Scroll to wake up lazy elements
+        js(driver, "window.scrollTo(0, document.body.scrollHeight / 2);")
+        time.sleep(1)
+        js(driver, "window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(1)
+
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+
+        hour_keywords = re.compile(
+            r"(business hours|opening hours|open hours|hours of operation|"
+            r"our hours|timings|schedule|open daily|mon\s*[-\u2013]?\s*sun|"
+            r"monday\s*[-\u2013]?\s*sunday|monday through)",
+            re.IGNORECASE
+        )
+        day_pattern = re.compile(
+            r"(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|"
+            r"fri(?:day)?|sat(?:urday)?|sun(?:day)?)"
+            r"[\s\-\u2013:,]+(?:through|to|[-\u2013])?\s*"
+            r"(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|"
+            r"fri(?:day)?|sat(?:urday)?|sun(?:day)?)?"
+            r"[\s\-\u2013:,]*"
+            r"(\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm)?)\s*[-\u2013to]+\s*"
+            r"(\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm)?)",
+            re.IGNORECASE
+        )
+
+        found_timings = []
+
+        for tag in soup.find_all(["div", "section", "footer", "p", "li", "span", "td"]):
+            text = tag.get_text(separator=" ", strip=True)
+            if len(text) > 300 or len(text) < 5:
+                continue
+            if hour_keywords.search(text):
+                matches = day_pattern.findall(text)
+                if matches:
+                    for m in matches:
+                        day1, day2, t1, t2 = m
+                        if day2:
+                            entry = f"{day1.capitalize()}-{day2.capitalize()}: {t1} - {t2}"
+                        else:
+                            entry = f"{day1.capitalize()}: {t1} - {t2}"
+                        if entry not in found_timings:
+                            found_timings.append(entry)
+                else:
+                    clean = text.strip()
+                    if re.search(r"\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm)", clean):
+                        found_timings.append(clean)
+
+        if not found_timings:
+            time_line = re.compile(
+                r"(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|"
+                r"fri(?:day)?|sat(?:urday)?|sun(?:day)?)"
+                r"[\s\S]{0,40}?"
+                r"(\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm))\s*[-\u2013to]+\s*"
+                r"(\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm))",
+                re.IGNORECASE
+            )
+            for m in time_line.finditer(soup.get_text(separator=" ")):
+                entry = m.group(0).strip()
+                if entry not in found_timings:
+                    found_timings.append(entry)
+
+        # Always navigate back to the Maps page so the detail panel is restored
+        # Restore the standard timeout and go back
+        try:
+            driver.set_page_load_timeout(60)
+            driver.get(current_url)
+            time.sleep(2)
+        except:
+            pass
+
+        return found_timings[:7]
+
+    except Exception as e:
+        logging.warning(f"Website timings fallback error: {e}")
+        return []
+
+
+def extract_timings(driver, website_url="N/A"):
+    """
+    Extract opening hours with 3-level fallback:
+      1. Google Maps dropdown table (original GNB logic).
+         — seen set is declared OUTSIDE the selector loop so the same day
+           is never added twice even if both CSS and XPath find the same table.
+         — break after first successful table so XPath doesn't re-process.
+         — If 2+ days found, return immediately.
+      2. If Maps gave 0-1 days: scrape remaining days from business website
+         (no duplicates — only adds days not already found from Maps).
+      3. If still only 1 day total after both: fill the remaining 6 days
+         with the same hours.
+    All DOM reads use JS textContent so they work off-screen.
+    """
+    ALL_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    maps_timings = []
+
+    # ── Level 1: Google Maps dropdown table ──────────────────────────────────
     try:
         # Only click toggle if the hours table is not already open
         if not driver.find_elements(By.CSS_SELECTOR, "table.eK4R0e"):
@@ -585,6 +978,9 @@ def extract_timings(driver):
 
         time.sleep(1.5)
 
+        # seen declared OUTSIDE the selector loop — prevents duplicate days
+        # when both CSS and XPath selectors find the same underlying table.
+        seen = set()
         for by, sel in [
             (By.CSS_SELECTOR, "table.eK4R0e"),
             (By.XPATH, "//div[@role='region']//table"),
@@ -593,7 +989,6 @@ def extract_timings(driver):
                 table = driver.find_element(by, sel)
                 rows = table.find_elements(By.CSS_SELECTOR, "tr.y0skZc") or \
                        table.find_elements(By.TAG_NAME, "tr")
-                timings, seen = [], set()
                 for row in rows:
                     try:
                         day_el = row.find_element(By.CSS_SELECTOR, "td.ylH6lf div")
@@ -606,15 +1001,48 @@ def extract_timings(driver):
                             hrs = (hrs_cell.get_attribute("aria-label") or "").strip()
                         if day and hrs and day not in seen:
                             seen.add(day)
-                            timings.append(f"{day}: {hrs}")
+                            maps_timings.append(f"{day}: {hrs}")
                     except:
                         pass
-                if timings:
-                    return " | ".join(timings)
+                if maps_timings:
+                    break  # found the table — don't try XPath fallback on same data
             except:
                 pass
+
+        if len(maps_timings) >= 2:
+            logging.info(f"Timings from Maps table: {len(maps_timings)} days")
+            return " | ".join(maps_timings)
+
     except Exception as e:
         logging.warning(f"Error extracting timings: {e}")
+
+    # ── Level 2: Website fallback for missing days only ───────────────────────
+    if len(maps_timings) < 2:
+        logging.info("Maps timings incomplete — trying website fallback...")
+        days_found = set(e.split(":")[0].strip().lower() for e in maps_timings)
+        web_timings = _extract_timings_from_website(driver, website_url)
+        if web_timings:
+            for wt in web_timings:
+                wt_day = wt.split(":")[0].strip().lower()
+                if wt_day not in days_found:
+                    maps_timings.append(wt)
+                    days_found.add(wt_day)
+        if len(maps_timings) >= 2:
+            logging.info(f"Timings after website merge: {len(maps_timings)} days")
+            return " | ".join(maps_timings)
+
+    # ── Level 3: Still only 1 day — fill remaining days with same hours ───────
+    if len(maps_timings) == 1:
+        logging.info("Only 1 day total — filling remaining days with same hours.")
+        single = maps_timings[0]
+        hours = single.split(":", 1)[1].strip() if ":" in single else ""
+        found_day = single.split(":")[0].strip().lower()
+        result = list(maps_timings)
+        for d in ALL_DAYS:
+            if d.lower() != found_day:
+                result.append(f"{d}: {hours}")
+        return " | ".join(result)
+
     return "N/A"
 
 # =========================
@@ -819,15 +1247,31 @@ def search_location(driver, wait, city):
 # DETAIL EXTRACTION
 # =========================
 def scrape_dealership_details(driver, wait):
+    """
+    Collect all Maps panel fields for one business.
+    IMPORTANT: reviews runs BEFORE timings.
+    Reason: _extract_timings_from_website navigates away from Maps to the
+    business website and then back — this reloads the Maps panel and destroys
+    the div.jftiEf review cards before extract_reviews can read them.
+    Running reviews first avoids this race condition entirely.
+    """
     try:
         time.sleep(DETAIL_PAGE_DELAY)
+        website = extract_website(driver)
+        name    = extract_name(driver)
+        rating  = extract_rating(driver)
+        address = extract_address(driver)
+        phone   = extract_phone(driver)
+        reviews = extract_reviews(driver)
+        timings = extract_timings(driver, website_url=website)
         return {
-            'name':    extract_name(driver),
-            'rating':  extract_rating(driver),
-            'address': extract_address(driver),
-            'phone':   extract_phone(driver),
-            'website': extract_website(driver),
-            'timings': extract_timings(driver),
+            'name':    name,
+            'rating':  rating,
+            'address': address,
+            'phone':   phone,
+            'website': website,
+            'timings': timings,
+            'reviews': reviews,
         }
     except Exception as e:
         logging.error(f"Error scraping details: {e}")
@@ -837,21 +1281,21 @@ def scrape_dealership_details(driver, wait):
 # WEBSITE SCRAPING
 # =========================
 def scroll_page_fully(driver):
+    """Smoothly scroll down to trigger lazy loading and then return to top."""
     try:
-        last_h = js(driver, "return document.body.scrollHeight")
-        js(driver, "window.scrollTo(0,0)")
-        time.sleep(0.5)
-        for _ in range(12):
-            js(driver, "window.scrollBy(0, window.innerHeight * 0.8)")
-            time.sleep(SCROLL_DELAY)
-            new_h = js(driver, "return document.body.scrollHeight")
-            if new_h == last_h:
-                break
-            last_h = new_h
-        js(driver, "window.scrollTo(0, document.body.scrollHeight)")
+        logging.info("Scrolling page smoothly...")
+        total_height = js(driver, "return document.body.scrollHeight")
+        # Scroll in increments of 300px
+        for i in range(1, total_height, 300):
+            js(driver, f"window.scrollTo(0, {i});")
+            time.sleep(0.1)
+        # One last jump to ensure we hit the bottom
+        js(driver, "window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1)
+        js(driver, "window.scrollTo(0, 0);")
+        time.sleep(0.5)
     except Exception as e:
-        logging.warning(f"Error scrolling page: {e}")
+        logging.warning(f"Scroll failed: {e}")
 
 
 def extract_logo_url(driver):
@@ -909,61 +1353,243 @@ def extract_services(driver):
         for kw, name in service_keywords.items():
             if kw in page_text and name not in services:
                 services.append(name)
+
+        # Keyword-based mapping logic requested by user
+        if services:
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            # Look for specific high-value phrases in headings/divs
+            for tag in soup.find_all(['h1', 'h2', 'h3', 'div', 'li']):
+                txt = tag.get_text().lower()
+                if any(k in txt for k in ['discover', 'experts', 'services', 'packages']):
+                    # Check if any service keywords are in this specific element's text
+                    for kw, name in service_keywords.items():
+                        if kw in txt and name not in services:
+                            services.append(name)
+
         return list(set(services)) if services else ["N/A"]
     except Exception as e:
         logging.error(f"Error extracting services: {e}")
         return ["N/A"]
 
 
-def extract_pricing(driver):
+def extract_about_us(driver):
+    # Phrases to skip (Boilerplate/Cookies)
+    exclude_patterns = [
+        'cookies', 'browser activity', 'privacy policy', 'terms of use',
+        'personalize content', 'analyze how our sites', 'review our terms',
+        'improve your experience', 'personalize content and ads',
+        'more information on how we collect and use', 'please review ourprivacy policy',
+        'we use cookies', 'to improve your experience', 'personalize content'
+    ]
+    # Minimum chars required — avoids returning nav labels like "About Us" (8 chars)
+    MIN_LENGTH = 80
+
     try:
-        page_text = js(driver, "return document.body.innerText")
-        prices = re.findall(r'\$\d+(?:,\d{3})*(?:\.\d{2})?', page_text)
-        if prices:
-            unique = list(set(prices[:10]))
-            result = []
-            for price in unique:
-                els = driver.find_elements(By.XPATH, f"//*[contains(text(),'{price}')]")
-                if els:
-                    try:
-                        parent = els[0].find_element(By.XPATH, "./parent::*")
-                        ctx = js(driver, "return arguments[0].textContent", parent)[:200].strip()
-                        result.append(ctx)
-                    except:
-                        result.append(price)
-                else:
-                    result.append(price)
-            return result if result else ["Prices found - see website"]
-        ptl = page_text.lower()
-        if any(k in ptl for k in ['pricing', 'packages', 'rates', 'cost']):
-            return ["Pricing page available - visit website"]
-        if 'contact' in ptl and 'quote' in ptl:
-            return ["Contact for quote"]
-        return ["Contact business for estimate"]
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        patterns = ['Discover a better way', 'About Us', 'Our story', 'Who we are']
+        for p in patterns:
+            target = soup.find(string=re.compile(p, re.IGNORECASE))
+            if target:
+                parent = target.parent
+                # Walk up the DOM up to 5 levels until we find real content
+                for _ in range(5):
+                    text = parent.get_text(separator=' ', strip=True)[:1500]
+                    if (len(text) >= MIN_LENGTH
+                            and not any(ep in text.lower() for ep in exclude_patterns)):
+                        return text
+                    if parent.parent:
+                        parent = parent.parent
+                    else:
+                        break
+
+        # Last resort: longest descriptive paragraph
+        paragraphs = [p.get_text(strip=True) for p in soup.find_all('p') if len(p.get_text()) > 150]
+        for p_text in paragraphs:
+            if not any(ep in p_text.lower() for ep in exclude_patterns):
+                return p_text
+
     except Exception as e:
-        logging.error(f"Error extracting pricing: {e}")
-        return ["N/A"]
+        logging.warning(f"About us extraction error: {e}")
+    return "N/A"
+
+
+def find_pricing_cards(driver):
+    """Scan page for pricing cards like in the user image."""
+    found_pricing = []
+    try:
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        price_pattern = re.compile(r'\$\d+(?:,\d{3})*(?:\.\d{2})?')
+
+        # Method 1: Container-level check (High Confidence)
+        containers = soup.find_all(['div', 'section', 'article', 'li'])
+        for container in containers:
+            text = container.get_text(separator=' ', strip=True)
+            pm = price_pattern.search(text)
+            if pm:
+                title = "Unknown"
+                # Look for bold/header text first
+                headers = container.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'b', 'title'])
+                for h in headers:
+                    h_txt = h.get_text(strip=True)
+                    if h_txt and 3 < len(h_txt) < 80 and '$' not in h_txt:
+                        title = h_txt
+                        break
+
+                # If no header, take first few words of the container if they look like a title
+                if title == "Unknown":
+                    lines = [l.strip() for l in text.split(' ') if l.strip()]
+                    if lines:
+                        title = " ".join(lines[:3])
+
+                if title != "Unknown":
+                    found_pricing.append(f"{title}: {pm.group(0)}")
+
+        # Method 2: Global text node check (Fallback)
+        if not found_pricing:
+            for text_node in soup.find_all(string=re.compile(r'\$\d+')):
+                parent = text_node.parent
+                price_match = price_pattern.search(text_node)
+                if not price_match:
+                    continue
+                price = price_match.group(0)
+
+                # Look for a title nearby
+                temp = parent
+                title = "N/A"
+                for _ in range(4):
+                    if not temp:
+                        break
+                    potential = temp.find_parent(['div', 'section'])
+                    if potential:
+                        h = potential.find(['h1', 'h2', 'h3', 'h4', 'strong', 'b'])
+                        if h:
+                            t = h.get_text(strip=True)
+                            if t and '$' not in t:
+                                title = t
+                                break
+                    temp = temp.parent
+
+                if title != "N/A":
+                    found_pricing.append(f"{title}: {price}")
+
+    except Exception as e:
+        logging.warning(f"Error in find_pricing_cards: {e}")
+
+    # Deduplicate and filter
+    clean_pricing = []
+    seen_names = set()
+    for s in found_pricing:
+        if ':' in s:
+            name, p = s.split(':', 1)
+            name = name.strip()
+            if name.lower() not in seen_names and 2 < len(name) < 100:
+                clean_pricing.append(s)
+                seen_names.add(name.lower())
+
+    return clean_pricing
+
+
+def navigate_to_pricing_page(driver):
+    """Look for Pricing/Services in header, handle dropdowns/links."""
+    logging.info("Checking header for Pricing/Services links...")
+
+    # Try the specific XPath provided by user first
+    hint_xpath = "/html/body/div[1]/div/nav/div/div/div[2]/a[3]"
+    try:
+        link = driver.find_element(By.XPATH, hint_xpath)
+        if link.is_displayed():
+            logging.info(f"Found hint link: {link.text}")
+            js(driver, "arguments[0].click()", link)
+            time.sleep(3)
+            return True
+    except:
+        pass
+
+    # Strategy: Find nav links and hover/click them
+    try:
+        from selenium.webdriver.common.action_chains import ActionChains
+        links = driver.find_elements(By.TAG_NAME, "a")
+
+        # Priority 1: Direct link search
+        for link in links:
+            try:
+                t = link.text.strip().lower()
+                if t in ['pricing', 'services', 'packages', 'our services', 'plans']:
+                    logging.info(f"Clicking Direct Nav Link: {t}")
+                    js(driver, "arguments[0].click()", link)
+                    time.sleep(3)
+                    return True
+            except:
+                continue
+
+        # Priority 2: Dropdown menus
+        for link in links:
+            try:
+                t = link.text.strip().lower()
+                if any(k in t for k in ['services', 'detailing', 'menu']):
+                    # Hover to trigger dropdown
+                    ActionChains(driver).move_to_element(link).perform()
+                    time.sleep(1)
+                    # Look for newly visible links
+                    sub_links = driver.find_elements(By.TAG_NAME, "a")
+                    for sl in sub_links:
+                        if sl.is_displayed():
+                            st = sl.text.strip().lower()
+                            if any(sk in st for sk in ['detailing', 'wash', 'ceramic', 'pricing']):
+                                logging.info(f"Found dropdown option: {st}")
+                                js(driver, "arguments[0].click()", sl)
+                                time.sleep(3)
+                                return True
+            except:
+                continue
+    except:
+        pass
+    return False
+
+
+def extract_pricing(driver, services):
+    """Enhanced pricing extraction using card-based detection."""
+    results = find_pricing_cards(driver)
+    if not results:
+        return ["Contact for pricing"]
+    return results
 
 
 def scrape_website_details(driver, url, business_name):
     logging.info(f"Scraping website: {url}")
-    details = {'logo_url': 'N/A', 'services': [], 'pricing': []}
+    details = {'logo_url': 'N/A', 'about_us': 'N/A', 'services': [], 'pricing': []}
     try:
-        for retry in range(3):
+        for retry in range(2):
             try:
                 driver.get(url)
-                time.sleep(2)
-                if driver.current_url and len(driver.page_source) > 1000:
+                time.sleep(3)
+                if len(driver.page_source) > 500:
                     break
-            except Exception as e:
-                logging.warning(f"Load retry {retry+1}: {e}")
+            except:
                 time.sleep(2)
 
-        time.sleep(PAGE_LOAD_DELAY + random.uniform(0.5, 1.5))
+        time.sleep(PAGE_LOAD_DELAY)
         scroll_page_fully(driver)
+
+        # Homepage collection
         details['logo_url'] = extract_logo_url(driver)
-        details['services']  = extract_services(driver)
-        details['pricing']   = extract_pricing(driver)
+        details['about_us'] = extract_about_us(driver)
+        details['services'] = extract_services(driver)
+        details['pricing']  = find_pricing_cards(driver)
+
+        # Try navigating to pricing/services if needed
+        if navigate_to_pricing_page(driver):
+            scroll_page_fully(driver)
+            sub_pricing  = find_pricing_cards(driver)
+            sub_services = extract_services(driver)
+
+            # Aggregate unique items
+            details['pricing']  = list(set(details['pricing']  + sub_pricing))
+            details['services'] = list(set(details['services'] + sub_services))
+
+        if not details['pricing']:
+            details['pricing'] = ["Contact for pricing"]
+
         return details
     except Exception as e:
         logging.error(f"Error scraping {url}: {e}")
@@ -981,7 +1607,6 @@ def run_phase1_for_city(driver, wait, city):
     if is_phase_completed(city, 'phase1'):
         logging.info(f"[SKIP] Phase 1 already done for {city}")
         return 0
-
     logging.info(f"\n{'='*60}\nPHASE 1 START: {city}\n{'='*60}")
     mark_phase_started(city, 'phase1')
 
@@ -989,158 +1614,120 @@ def run_phase1_for_city(driver, wait, city):
     if not connection:
         logging.error("DB connection failed. Skipping city.")
         return 0
+        
     try:
         existing_count = get_existing_count(connection, city)
         existing_names = get_existing_names(connection)
-    finally:
-        connection.close()
+        
+        if not search_location(driver, wait, city):
+            logging.error(f"Search failed for {city}")
+            return 0
 
-    if not search_location(driver, wait, city):
-        logging.error(f"Search failed for {city}")
-        return 0
+        # Pre-scroll
+        logging.info("Pre-scrolling to load all cards...")
+        scroll_results_container(driver, target_count=MAX_LEADS_PER_CITY + 20)
 
-    # Pre-scroll to load as many cards as possible BEFORE we start clicking.
-    # This prevents the "loading more" loop mid-scrape.
-    logging.info("Pre-scrolling to load all cards...")
-    scroll_results_container(driver, target_count=MAX_LEADS_PER_CITY + 20)
+        scraped_count = existing_count
+        error_count   = 0
+        names_seen_this_session = set()
+        last_name = "N/A"
 
-    cards = get_all_result_cards(driver)
-    logging.info(f"Cards loaded after pre-scroll: {len(cards)}")
-    if not cards:
-        logging.warning(f"No cards found for {city}")
-        return 0
-
-    scraped_count = existing_count
-    error_count   = 0
-    idx           = 0
-    last_name     = "N/A"
-
-    while scraped_count < MAX_LEADS_PER_CITY:
-        try:
-            if is_google_signin_page(driver):
-                logging.warning("Sign-in page detected. Re-searching...")
-                if not handle_google_signin(driver, wait, city):
-                    break
-                scroll_results_container(driver, target_count=MAX_LEADS_PER_CITY + 20)
-                cards = get_all_result_cards(driver)
-                idx = 0
-                continue
-
-            cards = get_all_result_cards(driver)
-
-            if idx >= len(cards):
-                logging.info(f"Card index {idx} >= total {len(cards)}. Scrolling for more...")
-                before = len(cards)
-                scroll_results_container(driver, target_count=idx + 15)
-                cards = get_all_result_cards(driver)
-                if len(cards) <= before:
-                    logging.info(f"No more cards. Done at {scraped_count} leads.")
-                    break
-
-            logging.info(f"\n--- Card {idx+1}/{len(cards)} ---")
-
+        while scraped_count < MAX_LEADS_PER_CITY:
             try:
-                cards = get_all_result_cards(driver)
-                if idx >= len(cards):
-                    idx += 1
-                    continue
-
-                card = cards[idx]
-
-                # Scroll card within the feed container via JS (not scrollIntoView)
+                # Basic check: ensure DB is still alive
                 try:
-                    js(driver, """
-                        var container = document.querySelector("div[role='feed']") ||
-                                        document.querySelector("div.m6QErb");
-                        if (container) {
-                            var r = arguments[0].getBoundingClientRect();
-                            var cr = container.getBoundingClientRect();
-                            if (r.top < cr.top || r.bottom > cr.bottom) {
-                                container.scrollTop += (r.top - cr.top - 100);
-                            }
-                        }
-                    """, card)
-                    time.sleep(0.4)
+                    connection.ping(reconnect=True)
                 except:
-                    pass
+                    logging.warning("DB ping failed. Attempting reconnect...")
+                    connection = get_db_connection()
+                    if not connection: break
 
-                # Click using CDP (bypasses visibility/focus requirements)
-                clicked = smart_click_card(driver, card)
-                if not clicked:
-                    logging.warning(f"Could not click card {idx+1}. Skipping.")
-                    idx += 1
-                    continue
-
-                # Wait for detail panel to update with a new name
-                deadline = time.time() + 10
-                updated  = False
-                while time.time() < deadline:
-                    current = extract_name(driver)
-                    if current != "N/A" and current != last_name:
-                        updated = True
-                        break
-                    time.sleep(0.5)
-
-                if not updated:
-                    logging.warning(f"Detail panel didn't update for card {idx+1}. Retry click...")
-                    cards = get_all_result_cards(driver)
-                    if idx < len(cards):
-                        smart_click_card(driver, cards[idx])
-                        time.sleep(3)
-                        current = extract_name(driver)
-                        if current == "N/A" or current == last_name:
-                            logging.warning(f"Still no update. Skipping card {idx+1}.")
-                            idx += 1
-                            continue
-
-                data = scrape_dealership_details(driver, wait)
-
-                if data and data['name'] != "N/A":
-                    name = data['name']
-                    key  = (city.lower(), name.lower())
-                    if key in existing_names:
-                        logging.info(f"Duplicate: {name}")
-                        idx += 1
-                        continue
-
-                    at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    if save_google_maps_data(city, name, data['rating'], data['address'],
-                                             data['phone'], data['website'], data['timings'], at):
-                        existing_names.add(key)
-                        last_name     = name
-                        scraped_count += 1
-                        logging.info(f"✓ Saved ({scraped_count}/{MAX_LEADS_PER_CITY}): {name}")
-                    else:
-                        logging.info(f"Duplicate skipped: {name}")
-                else:
-                    logging.warning(f"No data extracted for card {idx+1}")
-
-                idx += 1
-                time.sleep(random.uniform(0.8, 2.0))
-
-            except Exception as inner_e:
-                if "stale" in str(inner_e).lower():
-                    logging.warning("Stale element — re-fetching cards...")
-                    cards = get_all_result_cards(driver)
-                    time.sleep(0.5)
-                    continue
-                raise inner_e
-
-        except Exception as e:
-            error_count += 1
-            logging.error(f"Error on card {idx+1}: {e}")
-            import traceback
-            logging.error(traceback.format_exc())
-            try:
                 if is_google_signin_page(driver):
-                    if handle_google_signin(driver, wait, city):
-                        scroll_results_container(driver, target_count=MAX_LEADS_PER_CITY + 20)
-                        cards = get_all_result_cards(driver)
-                        idx = 0
-            except:
-                pass
-            idx += 1
-            time.sleep(2)
+                    logging.warning("Sign-in page detected...")
+                    if not handle_google_signin(driver, wait, city): break
+                    scroll_results_container(driver, target_count=MAX_LEADS_PER_CITY + 20)
+                    continue
+
+                cards = get_all_result_cards(driver)
+                target_card = None
+                
+                for c in cards:
+                    try:
+                        lbl = (c.get_attribute("aria-label") or "").strip()
+                        if lbl and lbl not in names_seen_this_session:
+                            target_card = c
+                            break
+                    except: continue
+
+                if not target_card:
+                    logging.info("Scrolling for more leads...")
+                    before = len(cards)
+                    scroll_results_container(driver, target_count=len(cards) + 20)
+                    if len(get_all_result_cards(driver)) <= before: break
+                    continue
+
+                logging.info(f"\n--- Processing Card {len(names_seen_this_session) + 1} | Leads in DB: {scraped_count}/{MAX_LEADS_PER_CITY} | city: {city} ---")
+                
+                js(driver, "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", target_card)
+                time.sleep(0.5)
+
+                if smart_click_card(driver, target_card):
+                    # Deduced name for tracking even if detail scrape fails
+                    deduced_name = (target_card.get_attribute("aria-label") or "").strip()
+                    
+                    # Panel update wait: wait for the detail panel name to match the card name or change from last
+                    updated = False
+                    for _ in range(15):
+                        current = extract_name(driver)
+                        if current != "N/A" and (current != last_name or (deduced_name and deduced_name in current)):
+                            updated = True
+                            break
+                        time.sleep(0.5)
+
+                    data = scrape_dealership_details(driver, wait)
+                    if data and data['name'] != "N/A":
+                        name = data['name']
+                        names_seen_this_session.add(name)
+                        if deduced_name: names_seen_this_session.add(deduced_name)
+
+                        # Detailed Logging
+                        logging.info(f"--- [SCRAPED DATA: {name}] ---")
+                        logging.info(f"  Rating:  {data['rating']}")
+                        logging.info(f"  Address: {data['address']}")
+                        logging.info(f"  Phone:   {data['phone']}")
+                        logging.info(f"  Website: {data['website']}")
+                        logging.info(f"{'-'*40}")
+                        
+                        at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        # Use a temporary check to see if it's a duplicate before saving
+                        if check_duplicate(connection, city, name):
+                            logging.info(f"Lead '{name}' already exists in DB. Moving on.")
+                            # We increment count anyway because we "found" it and it's in DB
+                            # Or we can just skip incrementing and move to next card
+                            last_name = name
+                        else:
+                            if save_google_maps_data(connection, city, name, data['rating'], data['address'],
+                                                     data['phone'], data['website'], data['timings'], data, at):
+                                scraped_count += 1
+                                last_name = name
+                                existing_names.add((city.lower(), name.lower()))
+                            else:
+                                logging.error(f"Failed to save {name} to database.")
+                                error_count += 1
+                    else:
+                        if deduced_name: names_seen_this_session.add(deduced_name)
+                        logging.warning(f"Failed to extract details for card: {deduced_name}")
+                
+                time.sleep(random.uniform(1, 2))
+
+            except Exception as e:
+                logging.warning(f"Error in Phase 1 lead loop: {e}")
+                time.sleep(2)
+
+    finally:
+        if connection:
+            connection.close()
 
     logging.info(f"\nPHASE 1 DONE: {city} — {scraped_count} leads, {error_count} errors")
     mark_phase_completed(city, 'phase1')
@@ -1183,11 +1770,21 @@ def run_phase2_for_city(driver, city):
         try:
             logging.info(f"\n--- Website: {name} | {website} ---")
             details  = scrape_website_details(driver, website, name)
+            
+            # Detailed logging of website scraping results
+            logging.info(f"--- [WEBSITE DATA: {name}] ---")
+            logging.info(f"  Logo URL: {details['logo_url']}")
+            logging.info(f"  Services: {', '.join(details['services']) if isinstance(details['services'], list) else details['services']}")
+            logging.info(f"  Pricing:  {', '.join(details['pricing']) if isinstance(details['pricing'], list) else details['pricing']}")
+            about_log = details['about_us'][:300] + "..." if len(details['about_us']) > 300 else details['about_us']
+            logging.info(f"  About Us: {about_log}")
+            logging.info(f"{'-'*40}")
             logo_url = details.get('logo_url', 'N/A')
+            about_us = details.get('about_us', 'N/A')
             services = '; '.join(details.get('services', [])) or 'N/A'
             pricing  = '; '.join(details.get('pricing', []))  or 'N/A'
 
-            if update_website_data(city, name, logo_url, services, pricing):
+            if update_website_data(city, name, logo_url, about_us, services, pricing):
                 ok += 1
                 logging.info(f"✓ Updated ({ok}/{len(leads)}): {name}")
             else:
