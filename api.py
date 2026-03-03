@@ -78,12 +78,14 @@ async def start_scraper():
             raise HTTPException(status_code=404, detail="GNB.py script not found")
         
         try:
-            # We use DEVNULL to avoid filling up pipes which can hang the process
+            # We use bufsize=1 (line buffered) and -u (unbuffered python) 
+            # to ensure logs show up immediately in Railway console.
             _proc = subprocess.Popen(
-                [sys.executable, SCRIPT],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                cwd=BASE
+                [sys.executable, "-u", SCRIPT],
+                stdout=None,  # Inherit stdout so it shows in Railway logs
+                stderr=None,  # Inherit stderr
+                cwd=BASE,
+                bufsize=1
             )
             logging.info(f"Scraper started with PID: {_proc.pid}")
             return {"status": "success", "message": "Scraper triggered", "pid": _proc.pid}
