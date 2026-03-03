@@ -110,82 +110,84 @@ logging.basicConfig(
 def start_driver():
     """Initialize undetected Chrome driver optimised for background use with enhanced stealth."""
     import undetected_chromedriver as uc
-    options = uc.ChromeOptions()
-
-    # Core anti-detection
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-
-    # High-level stealth: Mask headless-specific features
-    # These help bypass detection based on browser behavior differences
-    options.add_argument("--disable-infobars")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-notifications")
-    options.add_argument("--no-default-browser-check")
-    options.add_argument("--no-first-run")
-    options.add_argument("--ignore-certificate-errors")
-    options.add_argument("--password-store=basic")
-
-    # Keep Chrome fully active even when off-screen / not focused.
-    options.add_argument("--disable-background-timer-throttling")
-    options.add_argument("--disable-backgrounding-occluded-windows")
-    options.add_argument("--disable-renderer-backgrounding")
-    options.add_argument("--disable-ipc-flooding-protection")
-    options.add_argument("--disable-hang-monitor")
-    options.add_argument("--disable-prompt-on-repost")
-    options.add_argument("--disable-client-side-phishing-detection")
-    options.add_argument("--disable-features=TranslateUI,OptimizationHints,MediaRouter,DialMediaRouteProvider")
-    options.add_argument("--metrics-recording-only")
-    options.add_argument("--mute-audio")
-
-    # Set Window UI properties
-    options.add_argument(f"--window-size={WINDOW_WIDTH},{WINDOW_HEIGHT}")
-    options.add_argument(f"--window-position={OFFSCREEN_X},{OFFSCREEN_Y}")
-    options.add_argument("--force-device-scale-factor=1")
-    options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
-
-    if HEADLESS:
-        # Use new headless mode which is more like a real browser
-        options.add_argument("--headless=new")
-        options.add_argument("--disable-gpu")
-        # Mask the User-Agent if in headless to avoid 'HeadlessChrome'
-        # UC usually handles this but we'll already set it globally above
-    else:
-        options.add_argument("--use-gl=angle")
-        options.add_argument("--use-angle=swiftshader")
-
-    options.page_load_strategy = 'eager'
-
-    # Try to detect version to avoid mismatch
+    # Try to detect version to avoid mismatch (Windows & Linux)
     version_main = None
     try:
-        import winreg
-        for reg_path in [
-            (winreg.HKEY_CURRENT_USER,  r"Software\Google\Chrome\BLBeacon"),
-            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Google\Chrome\BLBeacon"),
-            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Google\Chrome\BLBeacon"),
-        ]:
-            try:
-                key = winreg.OpenKey(reg_path[0], reg_path[1])
-                v, _ = winreg.QueryValueEx(key, "version")
-                version_main = int(v.split('.')[0])
-                logging.info(f"Detected Chrome version: {version_main}")
-                break
-            except Exception:
-                continue
+        if sys.platform == 'win32':
+            import winreg
+            for reg_path in [
+                (winreg.HKEY_CURRENT_USER,  r"Software\Google\Chrome\BLBeacon"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Google\Chrome\BLBeacon"),
+            ]:
+                try:
+                    key = winreg.OpenKey(reg_path[0], reg_path[1])
+                    v, _ = winreg.QueryValueEx(key, "version")
+                    version_main = int(v.split('.')[0])
+                    break
+                except: continue
+        else:
+            # Linux detection (Railway/Docker)
+            import subprocess
+            for cmd in ["google-chrome", "google-chrome-stable", "chromium-browser"]:
+                try:
+                    out = subprocess.check_output([cmd, "--version"], stderr=subprocess.STDOUT).decode()
+                    v = re.search(r'(\d+)\.', out)
+                    if v:
+                        version_main = int(v.group(1))
+                        break
+                except: continue
     except:
         pass
+    
+    if version_main:
+        logging.info(f"Detected Chrome version: {version_main}")
+
+    def create_options():
+        opts = uc.ChromeOptions()
+        opts.add_argument("--disable-blink-features=AutomationControlled")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-infobars")
+        opts.add_argument("--disable-extensions")
+        opts.add_argument("--disable-notifications")
+        opts.add_argument("--no-default-browser-check")
+        opts.add_argument("--no-first-run")
+        opts.add_argument("--ignore-certificate-errors")
+        opts.add_argument("--password-store=basic")
+        opts.add_argument("--disable-background-timer-throttling")
+        opts.add_argument("--disable-backgrounding-occluded-windows")
+        opts.add_argument("--disable-renderer-backgrounding")
+        opts.add_argument("--disable-ipc-flooding-protection")
+        opts.add_argument("--disable-hang-monitor")
+        opts.add_argument("--disable-prompt-on-repost")
+        opts.add_argument("--disable-client-side-phishing-detection")
+        opts.add_argument("--disable-features=TranslateUI,OptimizationHints,MediaRouter,DialMediaRouteProvider")
+        opts.add_argument("--metrics-recording-only")
+        opts.add_argument("--mute-audio")
+        opts.add_argument(f"--window-size={WINDOW_WIDTH},{WINDOW_HEIGHT}")
+        opts.add_argument(f"--window-position={OFFSCREEN_X},{OFFSCREEN_Y}")
+        opts.add_argument("--force-device-scale-factor=1")
+        opts.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+        if HEADLESS:
+            opts.add_argument("--headless=new")
+            opts.add_argument("--disable-gpu")
+        else:
+            opts.add_argument("--use-gl=angle")
+            opts.add_argument("--use-angle=swiftshader")
+        opts.page_load_strategy = 'eager'
+        return opts
 
     try:
-        driver = uc.Chrome(options=options, use_subprocess=True, version_main=version_main)
+        driver = uc.Chrome(options=create_options(), use_subprocess=True, version_main=version_main)
     except Exception as e:
         if "version" in str(e).lower() or "session not created" in str(e).lower():
-            logging.warning(f"Version mismatch detected? Retrying with explicit version fallback... {e}")
+            logging.warning(f"Version mismatch retry... Attempting fallback version. Error: {e}")
             try:
-                driver = uc.Chrome(options=options, use_subprocess=True, version_main=145)
-            except:
-                raise e
+                # Re-create options to avoid "cannot reuse options" error
+                driver = uc.Chrome(options=create_options(), use_subprocess=True, version_main=145)
+            except Exception as e2:
+                logging.error(f"Fallback also failed: {e2}")
+                raise e2
         else:
             logging.error(f"Failed to initialize driver: {e}")
             raise e
