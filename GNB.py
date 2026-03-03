@@ -1619,8 +1619,14 @@ def run_phase1_for_city(driver, wait, city):
         
     try:
         existing_count = get_existing_count(connection, city)
-        existing_names = get_existing_names(connection)
+        existing_names = get_existing_names(connection) # set of (city.lower(), name.lower())
         
+        # Pre-seed seen names for this session to skip existing leads entirely
+        names_seen_this_session = set()
+        for c_low, n_low in existing_names:
+            if c_low == city.lower():
+                names_seen_this_session.add(n_low)
+
         if not search_location(driver, wait, city):
             logging.error(f"Search failed for {city}")
             return 0
@@ -1631,8 +1637,7 @@ def run_phase1_for_city(driver, wait, city):
 
         scraped_count = existing_count
         error_count   = 0
-        names_seen_this_session = set()
-        last_name = "N/A"
+        last_name     = "N/A"
 
         while scraped_count < MAX_LEADS_PER_CITY:
             try:
@@ -1655,8 +1660,13 @@ def run_phase1_for_city(driver, wait, city):
                 
                 for c in cards:
                     try:
-                        lbl = (c.get_attribute("aria-label") or "").strip()
+                        lbl = (c.get_attribute("aria-label") or "").strip().lower()
                         if lbl and lbl not in names_seen_this_session:
+                            # Strict check: card label might be different from stored name
+                            # but we attempt to skip obvious duplicates from DB
+                            if (city.lower(), lbl) in existing_names:
+                                names_seen_this_session.add(lbl)
+                                continue
                             target_card = c
                             break
                     except: continue
@@ -1688,9 +1698,13 @@ def run_phase1_for_city(driver, wait, city):
 
                     data = scrape_dealership_details(driver, wait)
                     if data and data['name'] != "N/A":
-                        name = data['name']
-                        names_seen_this_session.add(name)
-                        if deduced_name: names_seen_this_session.add(deduced_name)
+                        name = data['name'].strip()
+                        name_low = name.lower()
+                        
+                        # Mark BOTH the panel name and the card label as seen
+                        names_seen_this_session.add(name_low)
+                        if deduced_name: 
+                            names_seen_this_session.add(deduced_name.lower())
 
                         # Detailed Logging
                         logging.info(f"--- [SCRAPED DATA: {name}] ---")
