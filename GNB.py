@@ -66,7 +66,7 @@ CITIES = [
   "Yonkers",
 ]
 MAX_LEADS_PER_CITY = 200
-CITY_BATCH_SIZE = 2  # Phase 2 runs after every N cities finish Phase 1
+CITY_BATCH_SIZE = 1  # Restart browser between every city (prevents renderer memory leaks)
 
 # Delays (seconds)
 SEARCH_DELAY = 2
@@ -193,7 +193,7 @@ def start_driver():
             raise e
 
     driver.set_page_load_timeout(60)
-    driver.set_script_timeout(60)
+    driver.set_script_timeout(20)   # Fail fast on frozen renderers (was 60 s)
 
     # Patch __del__ to prevent errors during cleanup
     if hasattr(driver, "__del__"):
@@ -553,6 +553,38 @@ def get_existing_names(connection):
     except Error as e:
         logging.error(f"Error getting names: {e}")
         return set()
+
+
+def get_na_leads_globally():
+    """
+    Return ALL leads (across every city) that still have at least one of
+    logo_url / services / pricing equal to 'N/A' and have a valid website URL.
+    Returns list of (city, name, website) tuples.
+    """
+    connection = get_db_connection()
+    if not connection:
+        logging.error("get_na_leads_globally: DB connection failed")
+        return []
+    try:
+        cursor = connection.cursor()
+        cursor.execute(f"""
+            SELECT City, Name, Website
+            FROM {TABLE_NAME}
+            WHERE Website != 'N/A'
+              AND Website LIKE 'http%%'
+              AND (logo_url = 'N/A' OR services = 'N/A' OR pricing = 'N/A')
+            ORDER BY City, Name
+        """)
+        rows = cursor.fetchall()
+        cursor.close()
+        logging.info(f"[RETRY SWEEP] {len(rows)} leads still have N/A data globally.")
+        return rows
+    except Exception as e:
+        logging.error(f"get_na_leads_globally error: {e}")
+        return []
+    finally:
+        connection.close()
+
 
 # =========================
 # URL CLEANING
@@ -1282,15 +1314,26 @@ def scrape_dealership_details(driver, wait):
 # =========================
 # WEBSITE SCRAPING
 # =========================
+# Max scroll steps: 150 × 300 px = 45 000 px cap.
+# Prevents infinite loops on huge SPAs that grow their DOM while scrolling.
+_MAX_SCROLL_STEPS = 150
+
 def scroll_page_fully(driver):
-    """Smoothly scroll down to trigger lazy loading and then return to top."""
+    """Smoothly scroll down to trigger lazy loading and then return to top.
+    Capped at _MAX_SCROLL_STEPS iterations so a runaway page can never block forever.
+    """
     try:
         logging.info("Scrolling page smoothly...")
-        total_height = js(driver, "return document.body.scrollHeight")
-        # Scroll in increments of 300px
-        for i in range(1, total_height, 300):
+        total_height = js(driver, "return document.body.scrollHeight") or 0
+        step = 300
+        steps_taken = 0
+        for i in range(step, total_height + step, step):
+            if steps_taken >= _MAX_SCROLL_STEPS:
+                logging.warning(f"Scroll capped at {_MAX_SCROLL_STEPS} steps ({steps_taken*step}px).")
+                break
             js(driver, f"window.scrollTo(0, {i});")
             time.sleep(0.1)
+            steps_taken += 1
         # One last jump to ensure we hit the bottom
         js(driver, "window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1)
@@ -1557,45 +1600,69 @@ def extract_pricing(driver, services):
     return results
 
 
+# Hard per-website budget: 3 minutes total regardless of how many calls hang.
+_WEBSITE_TIMEOUT_SECONDS = 180
+
 def scrape_website_details(driver, url, business_name):
+    """Scrape a single business website with a hard 3-minute wall-clock timeout.
+    Uses a daemon thread so one frozen Chrome renderer can never block Phase 2 forever.
+    """
+    import threading
     logging.info(f"Scraping website: {url}")
-    details = {'logo_url': 'N/A', 'about_us': 'N/A', 'services': [], 'pricing': []}
-    try:
-        for retry in range(2):
-            try:
-                driver.get(url)
-                time.sleep(3)
-                if len(driver.page_source) > 500:
-                    break
-            except:
-                time.sleep(2)
 
-        time.sleep(PAGE_LOAD_DELAY)
-        scroll_page_fully(driver)
+    # Shared mutable container so the inner thread can return a value
+    result_box = [{'logo_url': 'N/A', 'about_us': 'N/A', 'services': [], 'pricing': []}]
 
-        # Homepage collection
-        details['logo_url'] = extract_logo_url(driver)
-        details['about_us'] = extract_about_us(driver)
-        details['services'] = extract_services(driver)
-        details['pricing']  = find_pricing_cards(driver)
+    def _scrape():
+        details = {'logo_url': 'N/A', 'about_us': 'N/A', 'services': [], 'pricing': []}
+        try:
+            for retry in range(2):
+                try:
+                    driver.get(url)
+                    time.sleep(3)
+                    if len(driver.page_source) > 500:
+                        break
+                except:
+                    time.sleep(2)
 
-        # Try navigating to pricing/services if needed
-        if navigate_to_pricing_page(driver):
+            time.sleep(PAGE_LOAD_DELAY)
             scroll_page_fully(driver)
-            sub_pricing  = find_pricing_cards(driver)
-            sub_services = extract_services(driver)
 
-            # Aggregate unique items
-            details['pricing']  = list(set(details['pricing']  + sub_pricing))
-            details['services'] = list(set(details['services'] + sub_services))
+            # Homepage collection
+            details['logo_url'] = extract_logo_url(driver)
+            details['about_us'] = extract_about_us(driver)
+            details['services'] = extract_services(driver)
+            details['pricing']  = find_pricing_cards(driver)
 
-        if not details['pricing']:
-            details['pricing'] = ["Contact for pricing"]
+            # Try navigating to pricing/services page if needed
+            if navigate_to_pricing_page(driver):
+                scroll_page_fully(driver)
+                sub_pricing  = find_pricing_cards(driver)
+                sub_services = extract_services(driver)
+                details['pricing']  = list(set(details['pricing']  + sub_pricing))
+                details['services'] = list(set(details['services'] + sub_services))
 
-        return details
-    except Exception as e:
-        logging.error(f"Error scraping {url}: {e}")
-        return details
+            if not details['pricing']:
+                details['pricing'] = ["Contact for pricing"]
+
+        except Exception as e:
+            logging.error(f"Error scraping {url}: {e}")
+        result_box[0] = details
+
+    t = threading.Thread(target=_scrape, daemon=True)
+    t.start()
+    t.join(timeout=_WEBSITE_TIMEOUT_SECONDS)
+
+    if t.is_alive():
+        logging.warning(
+            f"⏰ Website timeout ({_WEBSITE_TIMEOUT_SECONDS}s) for {business_name} ({url}). "
+            f"Returning partial data and moving on."
+        )
+        # Thread is still stuck in Chrome — we return whatever was collected so far
+        # (may be all N/A). The next lead will reuse the same driver; if the renderer
+        # is truly dead the driver-alive check in run_scraper will trigger a restart.
+
+    return result_box[0]
 
 # =========================
 # PHASE 1 — Google Maps scraping for one city
@@ -1752,11 +1819,15 @@ def run_phase1_for_city(driver, wait, city):
 # =========================
 # PHASE 2 — Website scraping for one city
 # =========================
-def run_phase2_for_city(driver, city):
+def run_phase2_for_city(driver, city, restart_fn=None):
     """
     Visit websites for all leads in a city and update DB.
     Skips cities already marked completed (crash recovery).
     Navigates directly to URLs — no tab switching needed.
+
+    After every city completes (or after every N leads), restart_fn() is called
+    to recycle the Chrome process and free accumulated memory.  Pass the
+    restart_driver closure from run_scraper so this function stays testable.
     """
     if is_phase_completed(city, 'phase2'):
         logging.info(f"[SKIP] Phase 2 already done for {city}")
@@ -1782,11 +1853,11 @@ def run_phase2_for_city(driver, city):
         return 0
 
     ok, err = 0, 0
-    for name, website in leads:
+    for idx, (name, website) in enumerate(leads, 1):
         try:
             logging.info(f"\n--- Website: {name} | {website} ---")
-            details  = scrape_website_details(driver, website, name)
-            
+            details = scrape_website_details(driver, website, name)
+
             # Detailed logging of website scraping results
             logging.info(f"--- [WEBSITE DATA: {name}] ---")
             logging.info(f"  Logo URL: {details['logo_url']}")
@@ -1795,6 +1866,7 @@ def run_phase2_for_city(driver, city):
             about_log = details['about_us'][:300] + "..." if len(details['about_us']) > 300 else details['about_us']
             logging.info(f"  About Us: {about_log}")
             logging.info(f"{'-'*40}")
+
             logo_url = details.get('logo_url', 'N/A')
             about_us = details.get('about_us', 'N/A')
             services = '; '.join(details.get('services', [])) or 'N/A'
@@ -1817,7 +1889,90 @@ def run_phase2_for_city(driver, city):
 
     logging.info(f"\nPHASE 2 DONE: {city} — {ok}/{len(leads)} updated, {err} errors")
     mark_phase_completed(city, 'phase2')
+
+    # ── Browser restart after every city ─────────────────────────────────────
+    # Recycling Chrome here clears all accumulated renderer memory, leaked JS
+    # heap, and stale DOM from the websites we just visited.  With
+    # CITY_BATCH_SIZE=1 this happens after every single city's Phase 2.
+    if restart_fn:
+        logging.info(f"♻️  Restarting browser after Phase 2 for {city} to free memory...")
+        restart_fn()
+    # ─────────────────────────────────────────────────────────────────────────
+
     return ok
+
+# =========================
+# RETRY SWEEP — re-scrape all remaining N/A leads across every city
+# =========================
+# How many batches to complete before triggering a global retry sweep.
+RETRY_SWEEP_EVERY_N_BATCHES = 3
+
+def run_retry_sweep(driver, restart_fn=None):
+    """
+    Query the DB for every lead (any city) still missing logo_url / services /
+    pricing and try to scrape their websites again using the standard Phase 2
+    logic (scrape_website_details → update_website_data).
+
+    Called automatically after every RETRY_SWEEP_EVERY_N_BATCHES batches and
+    once more at the very end of the full run.
+    """
+    logging.info("\n" + "*"*60)
+    logging.info("RETRY SWEEP: Checking for leads with N/A data across all cities...")
+    logging.info("*"*60)
+
+    leads = get_na_leads_globally()   # [(city, name, website), ...]
+    if not leads:
+        logging.info("[RETRY SWEEP] Nothing to retry — all leads are fully populated. ✓")
+        return
+
+    logging.info(f"[RETRY SWEEP] Will attempt to re-scrape {len(leads)} leads.")
+    ok = err = skipped = 0
+
+    for idx, (city, name, website) in enumerate(leads, 1):
+        try:
+            logging.info(f"[RETRY {idx}/{len(leads)}] {name} ({city}) → {website}")
+
+            if not is_driver_alive(driver):
+                logging.warning("[RETRY SWEEP] Driver dead — restarting before next lead.")
+                if restart_fn:
+                    restart_fn()
+                    driver = None   # will be read from ctx by restart_fn updating ctx
+
+            details = scrape_website_details(driver, website, name)
+
+            logo_url = details.get('logo_url', 'N/A')
+            about_us = details.get('about_us', 'N/A')
+            services = '; '.join(details.get('services', [])) or 'N/A'
+            pricing  = '; '.join(details.get('pricing',  [])) or 'N/A'
+
+            logging.info(f"  Logo: {logo_url[:60]}  |  Services: {services[:60]}  |  Pricing: {pricing[:60]}")
+
+            if update_website_data(city, name, logo_url, about_us, services, pricing):
+                ok += 1
+                logging.info(f"  ✓ Updated ({ok} so far): {name}")
+            else:
+                skipped += 1
+                logging.info(f"  — Skipped (still all N/A or no change): {name}")
+
+            time.sleep(random.uniform(2, 4))
+
+        except Exception as e:
+            err += 1
+            logging.error(f"[RETRY SWEEP] Error for {name}: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
+            continue
+
+    logging.info(
+        f"[RETRY SWEEP] Done — {ok} updated, {skipped} skipped, {err} errors "
+        f"out of {len(leads)} leads."
+    )
+
+    # Restart browser after the sweep to free memory from all the sites visited.
+    if restart_fn:
+        logging.info("♻️  Restarting browser after retry sweep to free memory...")
+        restart_fn()
+
 
 # =========================
 # MAIN — Batched execution
@@ -1892,7 +2047,9 @@ def run_scraper():
                     if not is_driver_alive(ctx["driver"]):
                         restart_driver()
                     try:
-                        run_phase2_for_city(ctx["driver"], city)
+                        # Pass restart_driver so Phase 2 can recycle the browser
+                        # after finishing each city (clears renderer memory leaks).
+                        run_phase2_for_city(ctx["driver"], city, restart_fn=restart_driver)
                         time.sleep(random.uniform(3, 6))
                         break  # success — move to next city
                     except Exception as e:
@@ -1905,8 +2062,34 @@ def run_scraper():
 
             logging.info(f"\nBatch {batch_num} complete: {batch}\n")
 
+            # ── Global N/A retry sweep every N batches ────────────────────────
+            # After every RETRY_SWEEP_EVERY_N_BATCHES completed batches, scan
+            # the entire DB for leads still missing logo / services / pricing
+            # and attempt to re-scrape them.  This catches sites that timed out
+            # earlier and are now recoverable with a fresh browser session.
+            if batch_num % RETRY_SWEEP_EVERY_N_BATCHES == 0:
+                logging.info(
+                    f"[RETRY SWEEP] Triggered after batch {batch_num} "
+                    f"(every {RETRY_SWEEP_EVERY_N_BATCHES} batches)."
+                )
+                run_retry_sweep(ctx["driver"], restart_fn=restart_driver)
+                # After sweep restart_fn already recycled the browser;
+                # ensure ctx reflects the fresh driver (restart_fn updates ctx).
+            # ─────────────────────────────────────────────────────────────────
+
     finally:
         logging.info("\n" + "="*60 + "\nSCRAPING COMPLETED\n" + "="*60)
+
+        # ── Final global retry sweep ──────────────────────────────────────────
+        # Runs once after ALL batches finish to catch any leads that were
+        # skipped/timed-out during the run and haven't been retried yet.
+        try:
+            logging.info("[FINAL SWEEP] Running end-of-run N/A retry sweep...")
+            run_retry_sweep(ctx["driver"], restart_fn=restart_driver)
+        except Exception as e:
+            logging.error(f"[FINAL SWEEP] Failed: {e}")
+        # ─────────────────────────────────────────────────────────────────────
+
         try:
             ctx["driver"].quit()
         except:

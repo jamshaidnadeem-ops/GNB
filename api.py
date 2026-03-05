@@ -1,10 +1,11 @@
 """
 GNB Headless API for Railway
 Endpoints:
-  POST /start  -> Trigger GNB Scraper (Postman)
-  GET  /leads  -> Fetch all results from DB
-  GET  /status -> Check running state and counts
-  POST /stop   -> Stop the scraper
+  POST /start              -> Trigger GNB Scraper (Postman)
+  GET  /leads              -> Fetch all results from DB
+  GET  /leads/full_details -> Fetch leads where no field is N/A
+  GET  /status             -> Check running state and counts
+  POST /stop               -> Stop the scraper
 """
 
 import sys, os, subprocess, threading, time, logging
@@ -60,10 +61,11 @@ async def root():
     return {
         "message": "GNB Headless API is active.",
         "endpoints": {
-            "POST /start": "Start the scraper",
-            "POST /stop":  "Stop the scraper",
-            "GET /leads":  "View all results",
-            "GET /status": "Check scraper health"
+            "POST /start":             "Start the scraper",
+            "POST /stop":              "Stop the scraper",
+            "GET /leads":              "View all results",
+            "GET /leads/full_details": "View leads with no N/A fields",
+            "GET /status":             "Check scraper health"
         }
     }
 
@@ -158,6 +160,52 @@ async def get_leads():
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         conn.close()
+
+@app.get("/leads/full_details")
+async def get_leads_full_details():
+    """
+    Returns all leads where NONE of the key fields equal 'N/A'.
+    Filtered columns: City, Name, Rating, Address, Phone, Website,
+                      Timings, reviews, logo_url, about_us, services, pricing.
+    """
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+
+    try:
+        cur = conn.cursor(pymysql.cursors.DictCursor)
+        query = f"""
+            SELECT * FROM {TABLE_NAME}
+            WHERE City     != 'N/A'
+              AND Name      != 'N/A'
+              AND Rating    != 'N/A'
+              AND Address   != 'N/A'
+              AND Phone     != 'N/A'
+              AND Website   != 'N/A'
+              AND Timings   != 'N/A'
+              AND reviews   != 'N/A'
+              AND logo_url  != 'N/A'
+              AND about_us  != 'N/A'
+              AND services  != 'N/A'
+              AND pricing   != 'N/A'
+            ORDER BY `Scraped At` DESC
+        """
+        cur.execute(query)
+        rows = cur.fetchall()
+        cur.close()
+
+        # Convert datetime objects to strings for JSON serialization
+        for r in rows:
+            for k, v in r.items():
+                if hasattr(v, "isoformat"):
+                    r[k] = str(v)
+
+        return {"count": len(rows), "leads": rows}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
 
 if __name__ == "__main__":
     import uvicorn
