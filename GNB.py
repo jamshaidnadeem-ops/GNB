@@ -11,6 +11,7 @@ import os
 import shutil
 from datetime import datetime
 import sys
+from urllib.error import HTTPError
 from bs4 import BeautifulSoup
 
 try:
@@ -108,6 +109,52 @@ logging.basicConfig(
 # =========================
 # DRIVER
 # =========================
+
+def _start_selenium_chrome_fallback(browser_path=None):
+    """Fallback when undetected_chromedriver fails (e.g. 404 from ChromeDriver repo). Uses Selenium's Chrome + Selenium Manager."""
+    from selenium.webdriver import Chrome
+    from selenium.webdriver.chrome.options import Options as ChromeOptions
+    opts = ChromeOptions()
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-infobars")
+    opts.add_argument("--disable-extensions")
+    opts.add_argument("--disable-notifications")
+    opts.add_argument("--no-default-browser-check")
+    opts.add_argument("--no-first-run")
+    opts.add_argument("--ignore-certificate-errors")
+    opts.add_argument("--password-store=basic")
+    opts.add_argument("--disable-background-timer-throttling")
+    opts.add_argument("--disable-backgrounding-occluded-windows")
+    opts.add_argument("--disable-renderer-backgrounding")
+    opts.add_argument("--disable-ipc-flooding-protection")
+    opts.add_argument("--disable-hang-monitor")
+    opts.add_argument("--disable-prompt-on-repost")
+    opts.add_argument("--disable-client-side-phishing-detection")
+    opts.add_argument("--disable-features=TranslateUI,OptimizationHints,MediaRouter,DialMediaRouteProvider")
+    opts.add_argument("--metrics-recording-only")
+    opts.add_argument("--mute-audio")
+    opts.add_argument(f"--window-size={WINDOW_WIDTH},{WINDOW_HEIGHT}")
+    opts.add_argument(f"--window-position={OFFSCREEN_X},{OFFSCREEN_Y}")
+    opts.add_argument("--force-device-scale-factor=1")
+    opts.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+    if HEADLESS:
+        opts.add_argument("--headless=new")
+        opts.add_argument("--disable-gpu")
+    else:
+        opts.add_argument("--use-gl=angle")
+        opts.add_argument("--use-angle=swiftshader")
+    opts.page_load_strategy = "eager"
+    if browser_path:
+        opts.binary_location = browser_path
+    try:
+        return Chrome(options=opts)
+    except Exception as e:
+        logging.error(f"Selenium Chrome fallback failed: {e}")
+        return None
+
+
 def start_driver():
     """Initialize undetected Chrome driver optimised for background use with enhanced stealth."""
     import undetected_chromedriver as uc
@@ -192,8 +239,13 @@ def start_driver():
         if browser_path:
             kwargs["browser_executable_path"] = browser_path
         driver = uc.Chrome(**kwargs)
-    except Exception as e:
-        if "version" in str(e).lower() or "session not created" in str(e).lower():
+    except (HTTPError, Exception) as e:
+        if isinstance(e, HTTPError) and e.code == 404:
+            logging.warning("undetected_chromedriver patcher got 404 (ChromeDriver repo). Falling back to standard Selenium Chrome.")
+            driver = _start_selenium_chrome_fallback(browser_path)
+            if driver is None:
+                raise e
+        elif "version" in str(e).lower() or "session not created" in str(e).lower():
             logging.warning(f"Version mismatch retry... Attempting fallback version. Error: {e}")
             try:
                 kwargs = {"options": create_options(), "use_subprocess": True, "version_main": 145}
@@ -201,11 +253,16 @@ def start_driver():
                     kwargs["browser_executable_path"] = browser_path
                 driver = uc.Chrome(**kwargs)
             except Exception as e2:
-                logging.error(f"Fallback also failed: {e2}")
-                raise e2
+                logging.warning(f"UC fallback failed: {e2}. Trying standard Selenium Chrome.")
+                driver = _start_selenium_chrome_fallback(browser_path)
+            if driver is None:
+                raise e
         else:
-            logging.error(f"Failed to initialize driver: {e}")
-            raise e
+            logging.warning(f"undetected_chromedriver failed: {e}. Trying standard Selenium Chrome.")
+            driver = _start_selenium_chrome_fallback(browser_path)
+            if driver is None:
+                logging.error(f"Failed to initialize driver: {e}")
+                raise e
 
     driver.set_page_load_timeout(60)
     driver.set_script_timeout(20)   # Fail fast on frozen renderers (was 60 s)
