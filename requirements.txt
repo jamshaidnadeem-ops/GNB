@@ -3,6 +3,7 @@ uvicorn[standard]
 pymysql
 pyngrok
 python-dotenv
+setuptools
 selenium
 undetected-chromedriver
 beautifulsoup4
