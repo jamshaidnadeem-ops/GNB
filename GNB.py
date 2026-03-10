@@ -1259,17 +1259,18 @@ def scroll_results_container(driver, target_count):
 
         new_count = len(get_all_result_cards(driver))
 
-        if attempt % 10 == 0:
+        if attempt % 5 == 0 or attempt == 0:
             logging.info(f"Scroll attempt {attempt}: {new_count} cards loaded")
 
-        # End-of-results check
-        try:
-            page_lower = driver.page_source.lower()
-            if any(t in page_lower for t in ["reached the end", "no more results"]):
-                logging.info("End of results detected.")
-                break
-        except:
-            pass
+        # End-of-results check (page_source is slow — only run every 5 attempts)
+        if attempt % 5 == 0:
+            try:
+                page_lower = driver.page_source.lower()
+                if any(t in page_lower for t in ["reached the end", "no more results"]):
+                    logging.info("End of results detected.")
+                    break
+            except:
+                pass
 
         if new_count > last_count:
             no_change_streak = 0
