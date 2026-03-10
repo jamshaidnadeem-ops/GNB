@@ -234,45 +234,54 @@ def start_driver():
         opts.page_load_strategy = 'eager'
         return opts
 
-    try:
-        kwargs = {"options": create_options(), "use_subprocess": True, "version_main": version_main}
-        if browser_path:
-            kwargs["browser_executable_path"] = browser_path
-        driver = uc.Chrome(**kwargs)
-    except (HTTPError, Exception) as e:
-        err_lower = str(e).lower()
-        # Prefer Selenium fallback when Chrome never started or connection refused (common on Linux/DO).
-        if (
-            isinstance(e, HTTPError) and e.code == 404
-            or "connection refused" in err_lower
-            or "cannot connect to chrome" in err_lower
-            or "chrome not reachable" in err_lower
-        ):
-            logging.warning("UC failed (404 or Chrome unreachable). Using standard Selenium Chrome.")
-            driver = _start_selenium_chrome_fallback(browser_path)
-            if driver is None:
-                raise e
-        elif "version" in err_lower or "session not created" in err_lower:
-            logging.warning(f"UC session/version error. Trying standard Selenium Chrome first. Error: {e}")
-            driver = _start_selenium_chrome_fallback(browser_path)
-            if driver is None:
-                logging.warning("Selenium fallback failed. Retrying UC with version_main=145...")
-                try:
-                    kwargs = {"options": create_options(), "use_subprocess": True, "version_main": 145}
-                    if browser_path:
-                        kwargs["browser_executable_path"] = browser_path
-                    driver = uc.Chrome(**kwargs)
-                except Exception as e2:
-                    logging.warning(f"UC fallback also failed: {e2}. Trying Selenium Chrome again.")
-                    driver = _start_selenium_chrome_fallback(browser_path)
-            if driver is None:
-                raise e
-        else:
-            logging.warning(f"undetected_chromedriver failed: {e}. Trying standard Selenium Chrome.")
-            driver = _start_selenium_chrome_fallback(browser_path)
-            if driver is None:
-                logging.error(f"Failed to initialize driver: {e}")
-                raise e
+    driver = None
+    # On Linux headless (e.g. Digital Ocean), use Selenium Chrome first — UC often crashes or drops connection.
+    if sys.platform != "win32" and HEADLESS:
+        logging.info("Linux headless: using Selenium Chrome (skip undetected_chromedriver for stability).")
+        driver = _start_selenium_chrome_fallback(browser_path)
+
+    if driver is None:
+        try:
+            kwargs = {"options": create_options(), "use_subprocess": True, "version_main": version_main}
+            if browser_path:
+                kwargs["browser_executable_path"] = browser_path
+            driver = uc.Chrome(**kwargs)
+        except (HTTPError, Exception) as e:
+            err_lower = str(e).lower()
+            # Prefer Selenium fallback when Chrome never started or connection refused (common on Linux/DO).
+            if (
+                isinstance(e, HTTPError) and e.code == 404
+                or "connection refused" in err_lower
+                or "cannot connect to chrome" in err_lower
+                or "chrome not reachable" in err_lower
+                or "connection aborted" in err_lower
+                or "remotedisconnected" in err_lower
+            ):
+                logging.warning("UC failed (404 or Chrome unreachable). Using standard Selenium Chrome.")
+                driver = _start_selenium_chrome_fallback(browser_path)
+                if driver is None:
+                    raise e
+            elif "version" in err_lower or "session not created" in err_lower:
+                logging.warning(f"UC session/version error. Trying standard Selenium Chrome first. Error: {e}")
+                driver = _start_selenium_chrome_fallback(browser_path)
+                if driver is None:
+                    logging.warning("Selenium fallback failed. Retrying UC with version_main=145...")
+                    try:
+                        kwargs = {"options": create_options(), "use_subprocess": True, "version_main": 145}
+                        if browser_path:
+                            kwargs["browser_executable_path"] = browser_path
+                        driver = uc.Chrome(**kwargs)
+                    except Exception as e2:
+                        logging.warning(f"UC fallback also failed: {e2}. Trying Selenium Chrome again.")
+                        driver = _start_selenium_chrome_fallback(browser_path)
+                if driver is None:
+                    raise e
+            else:
+                logging.warning(f"undetected_chromedriver failed: {e}. Trying standard Selenium Chrome.")
+                driver = _start_selenium_chrome_fallback(browser_path)
+                if driver is None:
+                    logging.error(f"Failed to initialize driver: {e}")
+                    raise e
 
     driver.set_page_load_timeout(60)
     driver.set_script_timeout(20)   # Fail fast on frozen renderers (was 60 s)
