@@ -451,6 +451,40 @@ def is_phase_completed(city, phase):
         connection.close()
 
 
+def report_progress():
+    """
+    Query scraper_progress and print how many cities have completed phase1 and phase2.
+    Run with: python GNB.py --report
+    """
+    connection = get_db_connection()
+    if not connection:
+        print("Could not connect to database. Check .env / DB config.")
+        return
+    try:
+        cursor = connection.cursor()
+        cursor.execute("""
+            SELECT phase, COUNT(*) AS n
+            FROM scraper_progress
+            WHERE status = 'completed'
+            GROUP BY phase
+        """)
+        rows = cursor.fetchall()
+        cursor.close()
+        phase1_count = phase2_count = 0
+        for phase, n in rows:
+            if phase == 'phase1':
+                phase1_count = n
+            elif phase == 'phase2':
+                phase2_count = n
+        print(f"Phase 1 completed: {phase1_count} cities")
+        print(f"Phase 2 completed: {phase2_count} cities")
+        print(f"(Phase 2 = logo, services, pricing scraped for that city)")
+    except Exception as e:
+        print(f"Error reporting progress: {e}")
+    finally:
+        connection.close()
+
+
 def check_duplicate(connection, city, name):
     try:
         cursor = connection.cursor()
@@ -1928,8 +1962,6 @@ def run_phase2_for_city(driver, city, restart_fn=None):
 # =========================
 # RETRY SWEEP — re-scrape all remaining N/A leads across every city
 # =========================
-# How many batches to complete before triggering a global retry sweep.
-RETRY_SWEEP_EVERY_N_BATCHES = 10
 
 def run_retry_sweep(driver, restart_fn=None):
     """
@@ -1937,8 +1969,8 @@ def run_retry_sweep(driver, restart_fn=None):
     pricing and try to scrape their websites again using the standard Phase 2
     logic (scrape_website_details → update_website_data).
 
-    Called automatically after every RETRY_SWEEP_EVERY_N_BATCHES batches and
-    once more at the very end of the full run.
+    Called once at the very end of the run, after every city has been scraped
+    (Phase 1 + Phase 2 for all cities).
     """
     logging.info("\n" + "*"*60)
     logging.info("RETRY SWEEP: Checking for leads with N/A data across all cities...")
@@ -2090,21 +2122,6 @@ def run_scraper():
 
             logging.info(f"\nBatch {batch_num} complete: {batch}\n")
 
-            # ── Global N/A retry sweep every N batches ────────────────────────
-            # After every RETRY_SWEEP_EVERY_N_BATCHES completed batches, scan
-            # the entire DB for leads still missing logo / services / pricing
-            # and attempt to re-scrape them.  This catches sites that timed out
-            # earlier and are now recoverable with a fresh browser session.
-            if batch_num % RETRY_SWEEP_EVERY_N_BATCHES == 0:
-                logging.info(
-                    f"[RETRY SWEEP] Triggered after batch {batch_num} "
-                    f"(every {RETRY_SWEEP_EVERY_N_BATCHES} batches)."
-                )
-                run_retry_sweep(ctx["driver"], restart_fn=restart_driver)
-                # After sweep restart_fn already recycled the browser;
-                # ensure ctx reflects the fresh driver (restart_fn updates ctx).
-            # ─────────────────────────────────────────────────────────────────
-
     finally:
         logging.info("\n" + "="*60 + "\nSCRAPING COMPLETED\n" + "="*60)
 
@@ -2127,4 +2144,7 @@ def run_scraper():
                 pass
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--report":
+        report_progress()
+        sys.exit(0)
     run_scraper()
