@@ -78,10 +78,9 @@ async def start_scraper():
         if not os.path.exists(SCRIPT):
             raise HTTPException(status_code=404, detail=f"GNB.py not found at {SCRIPT}")
         try:
+            # Inherit stdout/stderr so scraper logs appear in the same stream (e.g. Digital Ocean / Railway logs).
             _proc = subprocess.Popen(
                 [sys.executable, SCRIPT],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
                 cwd=BASE,
             )
             logging.info(f"Scraper started PID={_proc.pid}")
