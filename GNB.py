@@ -8,6 +8,7 @@ import logging
 import random
 import re
 import os
+import shutil
 from datetime import datetime
 import sys
 from bs4 import BeautifulSoup
@@ -142,6 +143,15 @@ def start_driver():
     if version_main:
         logging.info(f"Detected Chrome version: {version_main}")
 
+    # On Linux (e.g. Digital Ocean), find Chrome so uc doesn't set binary_location to non-string.
+    browser_path = None
+    if sys.platform != "win32":
+        for name in ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]:
+            p = shutil.which(name)
+            if p and isinstance(p, str):
+                browser_path = p
+                break
+
     def create_options():
         opts = uc.ChromeOptions()
         opts.add_argument("--disable-blink-features=AutomationControlled")
@@ -178,13 +188,18 @@ def start_driver():
         return opts
 
     try:
-        driver = uc.Chrome(options=create_options(), use_subprocess=True, version_main=version_main)
+        kwargs = {"options": create_options(), "use_subprocess": True, "version_main": version_main}
+        if browser_path:
+            kwargs["browser_executable_path"] = browser_path
+        driver = uc.Chrome(**kwargs)
     except Exception as e:
         if "version" in str(e).lower() or "session not created" in str(e).lower():
             logging.warning(f"Version mismatch retry... Attempting fallback version. Error: {e}")
             try:
-                # Re-create options to avoid "cannot reuse options" error
-                driver = uc.Chrome(options=create_options(), use_subprocess=True, version_main=145)
+                kwargs = {"options": create_options(), "use_subprocess": True, "version_main": 145}
+                if browser_path:
+                    kwargs["browser_executable_path"] = browser_path
+                driver = uc.Chrome(**kwargs)
             except Exception as e2:
                 logging.error(f"Fallback also failed: {e2}")
                 raise e2
