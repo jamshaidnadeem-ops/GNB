@@ -367,6 +367,9 @@ def init_database():
         cursor.execute(f"SHOW COLUMNS FROM {TABLE_NAME} LIKE 'about_us'")
         if not cursor.fetchone():
             cursor.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN about_us TEXT AFTER logo_url")
+        cursor.execute(f"SHOW COLUMNS FROM {TABLE_NAME} LIKE 'phase2_retry_attempted'")
+        if not cursor.fetchone():
+            cursor.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN phase2_retry_attempted TINYINT(1) DEFAULT 0")
 
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS scraper_progress (
@@ -555,10 +558,30 @@ def get_existing_names(connection):
         return set()
 
 
+def mark_lead_phase2_retry_attempted(city, name):
+    """Mark a lead as having been attempted in a phase-2 retry sweep so we don't retry it again."""
+    connection = get_db_connection()
+    if not connection:
+        return
+    try:
+        cursor = connection.cursor()
+        cursor.execute(f"""
+            UPDATE {TABLE_NAME} SET phase2_retry_attempted = 1
+            WHERE City = %s AND Name = %s
+        """, (city, name))
+        connection.commit()
+        cursor.close()
+    except Exception as e:
+        logging.warning(f"Could not mark phase2_retry_attempted: {e}")
+    finally:
+        connection.close()
+
+
 def get_na_leads_globally():
     """
-    Return ALL leads (across every city) that still have at least one of
-    logo_url / services / pricing equal to 'N/A' and have a valid website URL.
+    Return leads (across every city) that still have at least one of
+    logo_url / services / pricing equal to 'N/A', have a valid website URL,
+    and have NOT yet been attempted in a phase-2 retry sweep (phase2_retry_attempted = 0).
     Returns list of (city, name, website) tuples.
     """
     connection = get_db_connection()
@@ -573,6 +596,7 @@ def get_na_leads_globally():
             WHERE Website != 'N/A'
               AND Website LIKE 'http%%'
               AND (logo_url = 'N/A' OR services = 'N/A' OR pricing = 'N/A')
+              AND (phase2_retry_attempted = 0 OR phase2_retry_attempted IS NULL)
             ORDER BY City, Name
         """)
         rows = cursor.fetchall()
@@ -1905,7 +1929,7 @@ def run_phase2_for_city(driver, city, restart_fn=None):
 # RETRY SWEEP — re-scrape all remaining N/A leads across every city
 # =========================
 # How many batches to complete before triggering a global retry sweep.
-RETRY_SWEEP_EVERY_N_BATCHES = 3
+RETRY_SWEEP_EVERY_N_BATCHES = 10
 
 def run_retry_sweep(driver, restart_fn=None):
     """
@@ -1954,11 +1978,15 @@ def run_retry_sweep(driver, restart_fn=None):
                 skipped += 1
                 logging.info(f"  — Skipped (still all N/A or no change): {name}")
 
+            # Mark this lead as retry-attempted so we never retry it again in a future sweep.
+            mark_lead_phase2_retry_attempted(city, name)
             time.sleep(random.uniform(2, 4))
 
         except Exception as e:
             err += 1
             logging.error(f"[RETRY SWEEP] Error for {name}: {e}")
+            # Still mark as attempted so we don't retry this lead again in future sweeps.
+            mark_lead_phase2_retry_attempted(city, name)
             import traceback
             logging.error(traceback.format_exc())
             continue
