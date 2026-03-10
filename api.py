@@ -1,19 +1,32 @@
 """
-GNB Headless API for Railway
-Endpoints:
-  POST /start              -> Trigger GNB Scraper (Postman)
-  GET  /leads              -> Fetch all results from DB
-  GET  /leads/full_details -> Fetch leads where no field is N/A
-  GET  /status             -> Check running state and counts
-  POST /stop               -> Stop the scraper
+GNB FastAPI Server (Digital Ocean)
+  POST /start -> start scraper (GNB.py)
+  POST /stop  -> stop scraper
+  GET  /      -> simple info + dashboard if present
 """
 
 import sys, os, subprocess, threading, time, logging
-import pymysql
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 
-# Configure logging
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
+# Load .env file (local dev). On Digital Ocean, vars from environment.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+import pymysql
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, BASE)
+from GNB import TABLE_NAME, get_db_connection
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -23,192 +36,238 @@ logging.basicConfig(
     ],
 )
 
-BASE = os.path.dirname(os.path.abspath(__file__))
-SCRIPT = os.path.join(BASE, "GNB.py")
-TABLE_NAME = os.environ.get("TABLE_NAME", "car_detailers")
+LOG_FILE  = os.path.join(BASE, "gnb_scraper.log")
+SCRIPT    = os.path.join(BASE, "GNB.py")
+DASHBOARD = os.path.join(BASE, "gnb_dashboard.html")
 
-app = FastAPI(title="GNB Headless Scraper", version="3.0.0")
+app = FastAPI(title="GNB Scraper API", version="2.0.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
 
-# Database Configuration
-DB_CONFIG = {
-    "host":            os.environ.get("DB_HOST", ""),
-    "port":            int(os.environ.get("DB_PORT", 18897)),
-    "user":            os.environ.get("DB_USER", ""),
-    "password":        os.environ.get("DB_PASSWORD", ""),
-    "database":        os.environ.get("DB_NAME", "defaultdb"),
-    "charset":         "utf8mb4",
-}
 
-def get_db_connection():
-    try:
-        return pymysql.connect(**DB_CONFIG)
-    except Exception as e:
-        logging.error(f"Database connection failed: {e}")
-        return None
-
-# Scraper Process Management
-_proc = None
-_lock = threading.Lock()
-
-def _is_alive():
-    return _proc is not None and _proc.poll() is None
-
-@app.get("/")
+@app.get("/", include_in_schema=False)
 async def root():
+    if os.path.exists(DASHBOARD):
+        return FileResponse(DASHBOARD, media_type="text/html")
     return {
         "message": "GNB Headless API is active.",
         "endpoints": {
-            "POST /start":             "Start the scraper",
-            "POST /stop":              "Stop the scraper",
-            "GET /leads":              "View all results",
-            "GET /leads/full_details": "View leads with no N/A fields",
-            "GET /status":             "Check scraper health"
-        }
+            "POST /start": "Start the scraper",
+            "POST /stop": "Stop the scraper",
+        },
     }
+
+
+# ── Scraper process ───────────────────────────────────────────────────────────
+_proc = None
+_lock = threading.Lock()
+
+
+def _alive():
+    return _proc is not None and _proc.poll() is None
+
 
 @app.post("/start")
 async def start_scraper():
+    """Start GNB.py as a background process. No body required."""
     global _proc
     with _lock:
-        if _is_alive():
-            return {"status": "error", "message": "Scraper is already running"}
-        
+        if _alive():
+            raise HTTPException(status_code=409, detail="Scraper already running")
         if not os.path.exists(SCRIPT):
-            raise HTTPException(status_code=404, detail="GNB.py script not found")
-        
+            raise HTTPException(status_code=404, detail=f"GNB.py not found at {SCRIPT}")
         try:
-            # We use bufsize=1 (line buffered) and -u (unbuffered python) 
-            # to ensure logs show up immediately in Railway console.
             _proc = subprocess.Popen(
-                [sys.executable, "-u", SCRIPT],
-                stdout=None,  # Inherit stdout so it shows in Railway logs
-                stderr=None,  # Inherit stderr
+                [sys.executable, SCRIPT],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 cwd=BASE,
-                bufsize=1
             )
-            logging.info(f"Scraper started with PID: {_proc.pid}")
-            return {"status": "success", "message": "Scraper triggered", "pid": _proc.pid}
+            logging.info(f"Scraper started PID={_proc.pid}")
+            return {"status": "started", "pid": _proc.pid}
         except Exception as e:
-            logging.error(f"Failed to start scraper: {e}")
             raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/stop")
 async def stop_scraper():
     global _proc
     with _lock:
-        if not _is_alive():
-            return {"status": "info", "message": "Scraper is not running"}
-        
+        if not _alive():
+            return {"status": "not_running"}
         _proc.terminate()
         try:
-            _proc.wait(timeout=5)
+            _proc.wait(timeout=8)
         except subprocess.TimeoutExpired:
             _proc.kill()
-        
-        logging.info("Scraper stopped manually.")
-        return {"status": "success", "message": "Scraper stopped"}
+        logging.info("Scraper stopped")
+        return {"status": "stopped"}
 
-@app.get("/status")
+
+# ── Status (optional) ─────────────────────────────────────────────────────────
+@app.get("/status", include_in_schema=False)
 async def get_status():
+    progress = []
+    current_city = None
     stats = {}
+
     conn = get_db_connection()
     if conn:
         try:
             cur = conn.cursor(pymysql.cursors.DictCursor)
-            cur.execute(f"SELECT COUNT(*) as total FROM {TABLE_NAME}")
-            total = cur.fetchone()["total"]
-            
-            cur.execute(f"SELECT COUNT(DISTINCT City) as cities FROM {TABLE_NAME}")
-            cities = cur.fetchone()["cities"]
-            
-            stats = {"total_leads": total, "total_cities": cities}
+
+            cur.execute("SELECT city, phase, status FROM scraper_progress ORDER BY id")
+            progress = cur.fetchall()
+
+            cur.execute(
+                "SELECT city FROM scraper_progress WHERE status='in_progress' "
+                "ORDER BY started_at DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+            if row:
+                current_city = row["city"]
+
+            cur.execute(f"SELECT COUNT(*) as n FROM {TABLE_NAME}")
+            total = (cur.fetchone() or {}).get("n", 0)
+
+            cur.execute(f"SELECT COUNT(DISTINCT City) as n FROM {TABLE_NAME}")
+            cities = (cur.fetchone() or {}).get("n", 0)
+
+            cur.execute(
+                f"SELECT COUNT(*) as n FROM {TABLE_NAME} "
+                f"WHERE Website!='N/A' AND Website LIKE 'http%%'"
+            )
+            websites = (cur.fetchone() or {}).get("n", 0)
+
+            cur.execute(
+                f"SELECT COUNT(*) as n FROM {TABLE_NAME} "
+                f"WHERE Phone!='N/A' AND Phone!=''"
+            )
+            phones = (cur.fetchone() or {}).get("n", 0)
+
+            stats = {
+                "total": total, "cities": cities,
+                "websites": websites, "phones": phones,
+                "current_city": current_city,
+            }
             cur.close()
-        except:
-            stats = {"error": "Could not fetch stats"}
+        except Exception as e:
+            logging.warning(f"Status DB error: {e}")
         finally:
             conn.close()
 
     return {
-        "running": _is_alive(),
+        "running": _alive(),
+        "current_city": current_city,
+        "progress": progress,
         "stats": stats,
-        "time": time.strftime("%Y-%m-%d %H:%M:%S")
     }
 
-@app.get("/leads")
+
+@app.get("/stats", include_in_schema=False)
+async def get_stats():
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="DB connection failed")
+    try:
+        cur = conn.cursor()
+        cur.execute(f"SELECT COUNT(*) FROM {TABLE_NAME}")
+        total = cur.fetchone()[0]
+        cur.execute(f"SELECT COUNT(DISTINCT City) FROM {TABLE_NAME}")
+        cities = cur.fetchone()[0]
+        cur.execute(
+            f"SELECT COUNT(*) FROM {TABLE_NAME} WHERE Website!='N/A' AND Website LIKE 'http%%'"
+        )
+        websites = cur.fetchone()[0]
+        cur.execute(
+            f"SELECT COUNT(*) FROM {TABLE_NAME} WHERE Phone!='N/A' AND Phone!=''"
+        )
+        phones = cur.fetchone()[0]
+        cur.close()
+        return {"total": total, "cities": cities, "websites": websites, "phones": phones}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+
+@app.get("/logs", include_in_schema=False)
+async def get_logs(
+    since: int = Query(0, ge=0, description="Return lines starting from this line number"),
+    limit: int = Query(300, ge=1, le=1000),
+):
+    lines = []
+    total = 0
+    if os.path.exists(LOG_FILE):
+        try:
+            with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
+                all_lines = f.readlines()
+            total = len(all_lines)
+            lines = [l.rstrip("\n") for l in all_lines[since: since + limit]]
+        except Exception as e:
+            logging.warning(f"Log read error: {e}")
+    return {
+        "lines": lines,
+        "next_line": since + len(lines),
+        "total": total,
+        "running": _alive(),
+    }
+
+
+@app.get("/leads", include_in_schema=False)
 async def get_leads():
+    """Returns all leads — includes Phase 1 data + Phase 2 (services, pricing, logo_url)."""
     conn = get_db_connection()
     if not conn:
-        raise HTTPException(status_code=500, detail="Database connection failed")
-    
+        raise HTTPException(status_code=500, detail="DB connection failed")
     try:
         cur = conn.cursor(pymysql.cursors.DictCursor)
-        cur.execute(f"SELECT * FROM {TABLE_NAME} ORDER BY `Scraped At` DESC")
+        cur.execute(f"SELECT * FROM {TABLE_NAME} ORDER BY City, Name")
         rows = cur.fetchall()
         cur.close()
-        
-        # Convert datetime objects to string for JSON serialization
         for r in rows:
             for k, v in r.items():
                 if hasattr(v, "isoformat"):
                     r[k] = str(v)
-                    
-        return {"count": len(rows), "leads": rows}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        conn.close()
-
-@app.get("/leads/full_details")
-async def get_leads_full_details():
-    """
-    Returns all leads where NONE of the key fields equal 'N/A'.
-    Filtered columns: City, Name, Rating, Address, Phone, Website,
-                      Timings, reviews, logo_url, about_us, services, pricing.
-    """
-    conn = get_db_connection()
-    if not conn:
-        raise HTTPException(status_code=500, detail="Database connection failed")
-
-    try:
-        cur = conn.cursor(pymysql.cursors.DictCursor)
-        query = f"""
-            SELECT * FROM {TABLE_NAME}
-            WHERE City     != 'N/A'
-              AND Name      != 'N/A'
-              AND Rating    != 'N/A'
-              AND Address   != 'N/A'
-              AND Phone     != 'N/A'
-              AND Website   != 'N/A'
-              AND Timings   != 'N/A'
-              AND reviews   != 'N/A'
-              AND logo_url  != 'N/A'
-              AND about_us  != 'N/A'
-              AND services  != 'N/A'
-              AND pricing   != 'N/A'
-            ORDER BY `Scraped At` DESC
-        """
-        cur.execute(query)
-        rows = cur.fetchall()
-        cur.close()
-
-        # Convert datetime objects to strings for JSON serialization
-        for r in rows:
-            for k, v in r.items():
-                if hasattr(v, "isoformat"):
-                    r[k] = str(v)
-
-        return {"count": len(rows), "leads": rows}
+        logging.info(f"Served {len(rows)} leads")
+        return rows
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         conn.close()
 
 
+# ── Ngrok (local dev only — skipped on Railway) ───────────────────────────────
+NGROK_AUTHTOKEN = os.environ.get("NGROK_AUTHTOKEN", "")
+
+
+def start_ngrok(port):
+    try:
+        from pyngrok import ngrok
+        ngrok.set_auth_token(NGROK_AUTHTOKEN)
+        url = ngrok.connect(port)
+        logging.info("=" * 55)
+        logging.info(f"DASHBOARD  : {url}")
+        logging.info(f"START URL  : {url}/start  [POST]")
+        logging.info(f"LEADS URL  : {url}/leads")
+        logging.info(f"API DOCS   : {url}/docs")
+        logging.info("=" * 55)
+    except ImportError:
+        logging.warning("pyngrok not installed — run: pip install pyngrok")
+    except Exception as e:
+        logging.error(f"ngrok error: {e}")
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
+
     port = int(os.environ.get("PORT", 8000))
-    logging.info(f"Starting API on port {port}")
-    uvicorn.run(app, host="0.0.0.0", port=port)
+
+    if os.environ.get("NGROK_AUTHTOKEN"):
+        threading.Thread(target=start_ngrok, args=(port,), daemon=True).start()
+        time.sleep(2)
+
+    logging.info(f"GNB Dashboard starting on port {port}")
+    uvicorn.run("api:app", host="0.0.0.0", port=port)

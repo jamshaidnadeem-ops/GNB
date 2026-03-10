@@ -1,9 +1,9 @@
 fastapi
 uvicorn[standard]
-pydantic
 pymysql
+pyngrok
+python-dotenv
 selenium
 undetected-chromedriver
 beautifulsoup4
 requests
-python-dotenv
