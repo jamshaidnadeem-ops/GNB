@@ -69,6 +69,8 @@ CITIES = [
 ]
 MAX_LEADS_PER_CITY = 200
 CITY_BATCH_SIZE = 1  # Restart browser between every city (prevents renderer memory leaks)
+# Restart browser every N leads during Phase 2 to prevent tab crashes from memory buildup
+PHASE2_RESTART_EVERY_N_LEADS = 5
 
 # Delays (seconds)
 SEARCH_DELAY = 2
@@ -343,8 +345,20 @@ def is_driver_alive(driver):
     try:
         driver.title
         return True
-    except:
+    except Exception:
         return False
+
+
+def _is_tab_or_session_crash(e):
+    """True if the exception indicates a dead tab or session (need browser restart)."""
+    msg = (str(e) or "").lower()
+    return (
+        "tab crashed" in msg
+        or "session not created" in msg
+        or "invalid session" in msg
+        or "target window already closed" in msg
+        or "no such window" in msg
+    )
 
 
 def is_google_signin_page(driver):
@@ -1949,14 +1963,12 @@ def run_phase1_for_city(driver, wait, city):
 # =========================
 # PHASE 2 — Website scraping for one city
 # =========================
-def run_phase2_for_city(driver, city, restart_fn=None):
+def run_phase2_for_city(get_driver, city, restart_fn=None):
     """
     Visit websites for all leads in a city that still have N/A for logo/services/pricing.
-    Runs whenever there is work to do (leads with website but N/A data), so Phase 2
-    always runs after Phase 1 for each city when there are leads that need it.
-    Navigates directly to URLs — no tab switching needed.
-
-    After every city completes, restart_fn() is called to recycle the Chrome process.
+    get_driver: callable that returns the current driver (so after restart we get the new one).
+    Restarts browser every PHASE2_RESTART_EVERY_N_LEADS to prevent tab crashes from memory buildup.
+    On tab/session crash, restarts and retries the same lead once.
     """
     connection = get_db_connection()
     if not connection:
@@ -1977,50 +1989,67 @@ def run_phase2_for_city(driver, city, restart_fn=None):
 
     ok, err = 0, 0
     for idx, (name, website) in enumerate(leads, 1):
+        driver = get_driver()
+        details = None
         try:
             logging.info(f"\n--- Website: {name} | {website} ---")
             details = scrape_website_details(driver, website, name)
-
-            # Detailed logging of website scraping results
-            logging.info(f"--- [WEBSITE DATA: {name}] ---")
-            logging.info(f"  Logo URL: {details['logo_url']}")
-            logging.info(f"  Services: {', '.join(details['services']) if isinstance(details['services'], list) else details['services']}")
-            logging.info(f"  Pricing:  {', '.join(details['pricing']) if isinstance(details['pricing'], list) else details['pricing']}")
-            about_log = details['about_us'][:300] + "..." if len(details['about_us']) > 300 else details['about_us']
-            logging.info(f"  About Us: {about_log}")
-            logging.info(f"{'-'*40}")
-
-            logo_url = details.get('logo_url', 'N/A')
-            about_us = details.get('about_us', 'N/A')
-            services = '; '.join(details.get('services', [])) or 'N/A'
-            pricing  = '; '.join(details.get('pricing', []))  or 'N/A'
-
-            if update_website_data(city, name, logo_url, about_us, services, pricing):
-                ok += 1
-                logging.info(f"✓ Updated ({ok}/{len(leads)}): {name}")
+        except Exception as e:
+            if _is_tab_or_session_crash(e) and restart_fn:
+                logging.warning(f"Tab/session crashed for {name} — restarting browser and retrying once...")
+                try:
+                    restart_fn()
+                    time.sleep(2)
+                    driver = get_driver()
+                    details = scrape_website_details(driver, website, name)
+                except Exception as e2:
+                    err += 1
+                    logging.error(f"Error for {name} (after retry): {e2}")
+                    continue
             else:
-                logging.info(f"Skipped (all N/A): {name}")
+                err += 1
+                logging.error(f"Error for {name}: {e}")
+                import traceback
+                logging.error(traceback.format_exc())
+                continue
 
+        if details is not None:
+            try:
+                logging.info(f"--- [WEBSITE DATA: {name}] ---")
+                logging.info(f"  Logo URL: {details['logo_url']}")
+                logging.info(f"  Services: {', '.join(details['services']) if isinstance(details['services'], list) else details['services']}")
+                logging.info(f"  Pricing:  {', '.join(details['pricing']) if isinstance(details['pricing'], list) else details['pricing']}")
+                about_log = details['about_us'][:300] + "..." if len(details.get('about_us', '')) > 300 else details.get('about_us', '')
+                logging.info(f"  About Us: {about_log}")
+                logging.info(f"{'-'*40}")
+
+                logo_url = details.get('logo_url', 'N/A')
+                about_us = details.get('about_us', 'N/A')
+                services = '; '.join(details.get('services', [])) or 'N/A'
+                pricing  = '; '.join(details.get('pricing', []))  or 'N/A'
+
+                if update_website_data(city, name, logo_url, about_us, services, pricing):
+                    ok += 1
+                    logging.info(f"✓ Updated ({ok}/{len(leads)}): {name}")
+                else:
+                    logging.info(f"Skipped (all N/A): {name}")
+            except Exception as e:
+                err += 1
+                logging.error(f"Error saving/logging for {name}: {e}")
             time.sleep(random.uniform(2, 4))
 
-        except Exception as e:
-            err += 1
-            logging.error(f"Error for {name}: {e}")
-            import traceback
-            logging.error(traceback.format_exc())
-            continue
+        # Restart browser every N leads to prevent memory buildup and tab crashes
+        if idx % PHASE2_RESTART_EVERY_N_LEADS == 0 and restart_fn and idx < len(leads):
+            logging.info(f"♻️  Restarting browser after {idx} leads to free memory...")
+            restart_fn()
+            time.sleep(2)
 
     logging.info(f"\nPHASE 2 DONE: {city} — {ok}/{len(leads)} updated, {err} errors")
     mark_phase_completed(city, 'phase2')
 
-    # ── Browser restart after every city ─────────────────────────────────────
-    # Recycling Chrome here clears all accumulated renderer memory, leaked JS
-    # heap, and stale DOM from the websites we just visited.  With
-    # CITY_BATCH_SIZE=1 this happens after every single city's Phase 2.
     if restart_fn:
         logging.info(f"♻️  Restarting browser after Phase 2 for {city} to free memory...")
         restart_fn()
-    # ─────────────────────────────────────────────────────────────────────────
 
     return ok
 
@@ -2028,14 +2057,10 @@ def run_phase2_for_city(driver, city, restart_fn=None):
 # RETRY SWEEP — re-scrape all remaining N/A leads across every city
 # =========================
 
-def run_retry_sweep(driver, restart_fn=None):
+def run_retry_sweep(get_driver, restart_fn=None):
     """
-    Query the DB for every lead (any city) still missing logo_url / services /
-    pricing and try to scrape their websites again using the standard Phase 2
-    logic (scrape_website_details → update_website_data).
-
-    Called once at the very end of the run, after every city has been scraped
-    (Phase 1 + Phase 2 for all cities).
+    Re-scrape leads still missing logo/services/pricing. get_driver: callable
+    returning current driver. On tab crash, restarts and retries once.
     """
     logging.info("\n" + "*"*60)
     logging.info("RETRY SWEEP: Checking for leads with N/A data across all cities...")
@@ -2050,17 +2075,38 @@ def run_retry_sweep(driver, restart_fn=None):
     ok = err = skipped = 0
 
     for idx, (city, name, website) in enumerate(leads, 1):
+        driver = get_driver()
+        if not is_driver_alive(driver) and restart_fn:
+            logging.warning("[RETRY SWEEP] Driver dead — restarting before next lead.")
+            restart_fn()
+            time.sleep(2)
+            driver = get_driver()
+
         try:
             logging.info(f"[RETRY {idx}/{len(leads)}] {name} ({city}) → {website}")
-
-            if not is_driver_alive(driver):
-                logging.warning("[RETRY SWEEP] Driver dead — restarting before next lead.")
-                if restart_fn:
-                    restart_fn()
-                    driver = None   # will be read from ctx by restart_fn updating ctx
-
             details = scrape_website_details(driver, website, name)
+        except Exception as e:
+            if _is_tab_or_session_crash(e) and restart_fn:
+                logging.warning(f"[RETRY SWEEP] Tab crashed for {name} — restarting and retrying once...")
+                try:
+                    restart_fn()
+                    time.sleep(2)
+                    driver = get_driver()
+                    details = scrape_website_details(driver, website, name)
+                except Exception as e2:
+                    err += 1
+                    logging.error(f"[RETRY SWEEP] Error for {name} (after retry): {e2}")
+                    mark_lead_phase2_retry_attempted(city, name)
+                    continue
+            else:
+                err += 1
+                logging.error(f"[RETRY SWEEP] Error for {name}: {e}")
+                mark_lead_phase2_retry_attempted(city, name)
+                import traceback
+                logging.error(traceback.format_exc())
+                continue
 
+        try:
             logo_url = details.get('logo_url', 'N/A')
             about_us = details.get('about_us', 'N/A')
             services = '; '.join(details.get('services', [])) or 'N/A'
@@ -2074,19 +2120,11 @@ def run_retry_sweep(driver, restart_fn=None):
             else:
                 skipped += 1
                 logging.info(f"  — Skipped (still all N/A or no change): {name}")
-
-            # Mark this lead as retry-attempted so we never retry it again in a future sweep.
-            mark_lead_phase2_retry_attempted(city, name)
-            time.sleep(random.uniform(2, 4))
-
         except Exception as e:
             err += 1
-            logging.error(f"[RETRY SWEEP] Error for {name}: {e}")
-            # Still mark as attempted so we don't retry this lead again in future sweeps.
-            mark_lead_phase2_retry_attempted(city, name)
-            import traceback
-            logging.error(traceback.format_exc())
-            continue
+            logging.error(f"[RETRY SWEEP] Error updating for {name}: {e}")
+        mark_lead_phase2_retry_attempted(city, name)
+        time.sleep(random.uniform(2, 4))
 
     logging.info(
         f"[RETRY SWEEP] Done — {ok} updated, {skipped} skipped, {err} errors "
@@ -2172,9 +2210,8 @@ def run_scraper():
                     if not is_driver_alive(ctx["driver"]):
                         restart_driver()
                     try:
-                        # Pass restart_driver so Phase 2 can recycle the browser
-                        # after finishing each city (clears renderer memory leaks).
-                        run_phase2_for_city(ctx["driver"], city, restart_fn=restart_driver)
+                        # get_driver so Phase 2 can use fresh driver after restarts (avoids tab crashes).
+                        run_phase2_for_city(lambda: ctx["driver"], city, restart_fn=restart_driver)
                         time.sleep(random.uniform(3, 6))
                         break  # success — move to next city
                     except Exception as e:
@@ -2195,7 +2232,7 @@ def run_scraper():
         # skipped/timed-out during the run and haven't been retried yet.
         try:
             logging.info("[FINAL SWEEP] Running end-of-run N/A retry sweep...")
-            run_retry_sweep(ctx["driver"], restart_fn=restart_driver)
+            run_retry_sweep(lambda: ctx["driver"], restart_fn=restart_driver)
         except Exception as e:
             logging.error(f"[FINAL SWEEP] Failed: {e}")
         # ─────────────────────────────────────────────────────────────────────
