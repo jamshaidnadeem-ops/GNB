@@ -150,11 +150,22 @@ def _start_selenium_chrome_fallback(browser_path=None):
     opts.page_load_strategy = "eager"
     if browser_path:
         opts.binary_location = browser_path
-    try:
-        return Chrome(options=opts)
-    except Exception as e:
-        logging.error(f"Selenium Chrome fallback failed: {e}")
-        return None
+    for attempt in range(1, 4):
+        try:
+            return Chrome(options=opts)
+        except Exception as e:
+            # Resource temporarily unavailable (errno 11) or driver obtain failure — retry with delay
+            if attempt < 3 and (
+                (isinstance(e, (BlockingIOError, OSError)) and getattr(e, "errno", None) == 11)
+                or "resource temporarily unavailable" in str(e).lower()
+                or "unable to obtain driver" in str(e).lower()
+            ):
+                logging.warning(f"Selenium Chrome start failed (attempt {attempt}/3), retrying in 10s: {e}")
+                time.sleep(10)
+                continue
+            logging.error(f"Selenium Chrome fallback failed: {e}")
+            return None
+    return None
 
 
 def start_driver():
@@ -260,11 +271,26 @@ def start_driver():
             if driver is None:
                 raise e
         else:
-            logging.warning(f"undetected_chromedriver failed: {e}. Trying standard Selenium Chrome.")
-            driver = _start_selenium_chrome_fallback(browser_path)
+            driver = None
+            # On resource exhaustion (errno 11) after long runs, retry uc.Chrome with delay before fallback
+            if (isinstance(e, (BlockingIOError, OSError)) and getattr(e, "errno", None) == 11) or "resource temporarily unavailable" in str(e).lower():
+                for retry in range(2):
+                    logging.warning(f"Resource temporarily unavailable, retrying in 10s (attempt {retry+2}/3)...")
+                    time.sleep(10)
+                    try:
+                        kwargs = {"options": create_options(), "use_subprocess": True, "version_main": version_main}
+                        if browser_path:
+                            kwargs["browser_executable_path"] = browser_path
+                        driver = uc.Chrome(**kwargs)
+                        break
+                    except Exception as re:
+                        e = re
             if driver is None:
-                logging.error(f"Failed to initialize driver: {e}")
-                raise e
+                logging.warning(f"undetected_chromedriver failed: {e}. Trying standard Selenium Chrome.")
+                driver = _start_selenium_chrome_fallback(browser_path)
+                if driver is None:
+                    logging.error(f"Failed to initialize driver: {e}")
+                    raise e
 
     driver.set_page_load_timeout(60)
     driver.set_script_timeout(20)   # Fail fast on frozen renderers (was 60 s)
