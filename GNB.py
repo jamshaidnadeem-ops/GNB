@@ -1951,21 +1951,13 @@ def run_phase1_for_city(driver, wait, city):
 # =========================
 def run_phase2_for_city(driver, city, restart_fn=None):
     """
-    Visit websites for all leads in a city and update DB.
-    Skips cities already marked completed (crash recovery).
+    Visit websites for all leads in a city that still have N/A for logo/services/pricing.
+    Runs whenever there is work to do (leads with website but N/A data), so Phase 2
+    always runs after Phase 1 for each city when there are leads that need it.
     Navigates directly to URLs — no tab switching needed.
 
-    After every city completes (or after every N leads), restart_fn() is called
-    to recycle the Chrome process and free accumulated memory.  Pass the
-    restart_driver closure from run_scraper so this function stays testable.
+    After every city completes, restart_fn() is called to recycle the Chrome process.
     """
-    if is_phase_completed(city, 'phase2'):
-        logging.info(f"[SKIP] Phase 2 already done for {city}")
-        return 0
-
-    logging.info(f"\n{'='*60}\nPHASE 2 START: {city}\n{'='*60}")
-    mark_phase_started(city, 'phase2')
-
     connection = get_db_connection()
     if not connection:
         logging.error("DB connection failed for Phase 2")
@@ -1973,14 +1965,15 @@ def run_phase2_for_city(driver, city, restart_fn=None):
 
     try:
         leads = get_leads_with_websites(connection, city)
-        logging.info(f"{len(leads)} leads with websites for {city}")
     finally:
         connection.close()
 
     if not leads:
-        logging.info(f"No website leads for {city}. Phase 2 done.")
-        mark_phase_completed(city, 'phase2')
+        logging.info(f"[SKIP] No leads needing Phase 2 for {city} (all have website data or no website).")
         return 0
+
+    logging.info(f"\n{'='*60}\nPHASE 2 START: {city} — {len(leads)} leads with websites to scrape\n{'='*60}")
+    mark_phase_started(city, 'phase2')
 
     ok, err = 0, 0
     for idx, (name, website) in enumerate(leads, 1):
