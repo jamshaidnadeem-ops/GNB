@@ -55,6 +55,8 @@ async def root():
         "endpoints": {
             "POST /start": "Start the scraper",
             "POST /stop": "Stop the scraper",
+            "GET /leads": "All leads",
+            "GET /leads/full_details": "Leads with no N/A in any field",
         },
     }
 
@@ -230,6 +232,44 @@ async def get_leads():
                 if hasattr(v, "isoformat"):
                     r[k] = str(v)
         logging.info(f"Served {len(rows)} leads")
+        return rows
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+
+@app.get("/leads/full_details", include_in_schema=True)
+async def get_leads_full_details():
+    """Returns leads that have no N/A in any key field (City, Name, Rating, Address, Phone, Website, Timings, reviews, logo_url, about_us, services, pricing)."""
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="DB connection failed")
+    try:
+        cur = conn.cursor(pymysql.cursors.DictCursor)
+        cur.execute(f"""
+            SELECT * FROM {TABLE_NAME}
+            WHERE City     != 'N/A' AND COALESCE(City, '') != ''
+              AND Name     != 'N/A' AND COALESCE(Name, '') != ''
+              AND Rating   != 'N/A' AND COALESCE(Rating, '') != ''
+              AND Address  != 'N/A' AND COALESCE(Address, '') != ''
+              AND Phone    != 'N/A' AND COALESCE(Phone, '') != ''
+              AND Website  != 'N/A' AND COALESCE(Website, '') != ''
+              AND Timings  != 'N/A' AND COALESCE(Timings, '') != ''
+              AND reviews  != 'N/A' AND COALESCE(reviews, '') != ''
+              AND logo_url != 'N/A' AND COALESCE(logo_url, '') != ''
+              AND about_us != 'N/A' AND COALESCE(about_us, '') != ''
+              AND services != 'N/A' AND COALESCE(services, '') != ''
+              AND pricing  != 'N/A' AND COALESCE(pricing, '') != ''
+            ORDER BY City, Name
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        for r in rows:
+            for k, v in r.items():
+                if hasattr(v, "isoformat"):
+                    r[k] = str(v)
+        logging.info(f"Served {len(rows)} full-detail leads")
         return rows
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
