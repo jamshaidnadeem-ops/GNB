@@ -384,7 +384,32 @@ def _is_tab_or_session_crash(e):
         or "invalid session" in msg
         or "target window already closed" in msg
         or "no such window" in msg
+        or "connection refused" in msg
+        or "max retries exceeded" in msg
     )
+
+
+def get_cities_with_both_phases_completed():
+    """Return set of city names that have both phase1 and phase2 completed in scraper_progress."""
+    connection = get_db_connection()
+    if not connection:
+        return set()
+    try:
+        cursor = connection.cursor()
+        cursor.execute("""
+            SELECT city FROM scraper_progress
+            WHERE status = 'completed'
+            GROUP BY city
+            HAVING COUNT(DISTINCT phase) = 2
+        """)
+        rows = cursor.fetchall()
+        cursor.close()
+        return {row[0] for row in rows} if rows else set()
+    except Exception as e:
+        logging.warning(f"Could not get completed cities: {e}")
+        return set()
+    finally:
+        connection.close()
 
 
 def is_google_signin_page(driver):
@@ -2169,10 +2194,18 @@ def run_retry_sweep(get_driver, restart_fn=None):
 def run_scraper():
     """
     Batch strategy:
-      - Split cities into batches of CITY_BATCH_SIZE
+      - Only run cities that have not completed both phase1 and phase2 (skips completed).
+      - Split remaining cities into batches of CITY_BATCH_SIZE
       - For each batch: Phase 1 all cities → Phase 2 all cities → next batch
       - Both phases use scraper_progress table for crash recovery
       - Browser placed off-screen (not minimized) so you can use your PC freely
+
+    Common errors and causes:
+      - "Connection refused" / "Max retries exceeded": Chrome process died but script
+        kept using the old session; we treat these as dead session and restart+retry.
+      - "Resource temporarily unavailable" (errno 11): System out of processes/memory
+        when starting Chrome; we retry with delay and wait longer after quit() before
+        starting a new driver so the OS can reclaim resources.
     """
     logging.info("Starting Google Maps Car Detailers Scraper")
     logging.info(f"Cities: {CITIES}")
@@ -2182,6 +2215,15 @@ def run_scraper():
     if not init_database():
         logging.error("Failed to initialize database. Exiting.")
         return
+
+    # Only run cities that have not completed both phase1 and phase2 (reduces load, avoids rework).
+    completed_cities = get_cities_with_both_phases_completed()
+    cities_to_run = [c for c in CITIES if c not in completed_cities]
+    if not cities_to_run:
+        logging.info("All cities already have phase1 and phase2 completed. Nothing to do.")
+        return
+    if len(completed_cities) > 0:
+        logging.info(f"Skipping {len(completed_cities)} completed cities. Running {len(cities_to_run)} cities.")
 
     # Use a mutable dict so restart_driver() can update the driver reference
     # in-place and both the outer loop and phase functions always use the latest.
@@ -2195,7 +2237,8 @@ def run_scraper():
             ctx["driver"].quit()
         except:
             pass
-        time.sleep(3)
+        # Longer pause so OS can reclaim memory/FDs before starting new Chrome (avoids errno 11).
+        time.sleep(10)
         try:
             ctx["driver"] = start_driver()
             ctx["wait"]   = WebDriverWait(ctx["driver"], 20)
@@ -2204,7 +2247,7 @@ def run_scraper():
             logging.error(f"Failed to restart driver: {e}")
 
     try:
-        batches = [CITIES[i:i+CITY_BATCH_SIZE] for i in range(0, len(CITIES), CITY_BATCH_SIZE)]
+        batches = [cities_to_run[i:i+CITY_BATCH_SIZE] for i in range(0, len(cities_to_run), CITY_BATCH_SIZE)]
 
         for batch_num, batch in enumerate(batches, 1):
             logging.info(f"\n{'#'*60}")
