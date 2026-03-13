@@ -39,33 +39,8 @@ SEARCH_QUERY = "car detailers"
 # Philadelphia, Phoenix
 # ─────────────────────────────────────────────────────────────────────────────
 CITIES = [
-  "Albuquerque", "Anchorage", "Atlanta", "Austin",
-  "Baltimore", "Baton Rouge", "Birmingham", "Boise", "Boston", "Buffalo",
-  "Chandler", "Charlotte", "Chesapeake", "Chula Vista", "Cincinnati",
-  "Clarksville", "Corpus Christi",
-  "Dallas", "Denver", "Des Moines", "Detroit", "Durham",
-  "El Paso",
-  "Fayetteville", "Fort Wayne", "Fort Worth", "Fremont", "Fresno",
-  "Garland", "Gilbert", "Glendale", "Grand Rapids", "Greensboro",
-  "Henderson", "Hialeah", "Honolulu", "Huntington Beach", "Huntsville",
-  "Indianapolis", "Irvine", "Irving",
-  "Jacksonville", "Jersey City",
-  "Kansas City", "Knoxville",
-  "Laredo", "Las Vegas", "Lexington", "Lincoln", "Long Beach", "Louisville", "Lubbock",
-  "Madison", "Memphis", "Mesa", "Miami", "Milwaukee", "Minneapolis",
-  "Modesto", "Montgomery", "Moreno Valley",
-  "Nashville", "New Orleans", "Norfolk", "North Las Vegas",
-  "Oakland", "Oklahoma City", "Omaha", "Orlando", "Oxnard",
-  "Pittsburgh", "Plano", "Portland",
-  "Raleigh", "Reno", "Richmond", "Riverside", "Rochester",
-  "Sacramento", "Saint Paul", "Salt Lake City", "San Antonio",
-  "San Bernardino", "San Diego", "San Francisco", "San Jose",
-  "Santa Ana", "Santa Clarita", "Scottsdale", "Seattle",
-  "Shreveport", "Spokane", "Stockton", "St. Louis", "St. Petersburg", "Syracuse",
-  "Tacoma", "Tallahassee", "Tampa", "Toledo", "Tucson", "Tulsa",
-  "Virginia Beach",
-  "Washington DC", "Wichita", "Winston-Salem", "Worcester",
-  "Yonkers",
+  "Santa Clarita", "Shreveport", "Spokane", "Stockton", "Tallahassee",
+  "Tucson", "Tulsa", "Washington DC", "Yonkers"
 ]
 MAX_LEADS_PER_CITY = 200
 CITY_BATCH_SIZE = 1  # Restart browser between every city (prevents renderer memory leaks)
@@ -2314,8 +2289,50 @@ def run_scraper():
             except:
                 pass
 
+def _rewrite_cities_list(remaining_cities):
+    """Rewrite CITIES list in this file to only include remaining_cities (removes completed)."""
+    import re
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "GNB.py")
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    # Build new CITIES block (same style: multiple cities per line)
+    lines = []
+    for i in range(0, len(remaining_cities), 5):
+        chunk = remaining_cities[i : i + 5]
+        line = "  " + ", ".join(f'"{c}"' for c in chunk)
+        if i + 5 < len(remaining_cities):
+            line += ","
+        lines.append(line)
+    new_block = "CITIES = [\n" + "\n".join(lines) + "\n]\n"
+    # Replace CITIES = [ ... ] block (from opening to line with ] only)
+    pattern = r"CITIES = \[\n.*?\n\]\n"
+    if not re.search(pattern, content, re.DOTALL):
+        logging.error("Could not find CITIES block in file.")
+        return False
+    new_content = re.sub(pattern, new_block, content, count=1, flags=re.DOTALL)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(new_content)
+    logging.info(f"Updated CITIES to {len(remaining_cities)} cities (removed completed).")
+    return True
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--report":
         report_progress()
+        sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "--remove-completed-cities":
+        if not init_database():
+            logging.error("DB connection failed.")
+            sys.exit(1)
+        completed = get_cities_with_both_phases_completed()
+        remaining = [c for c in CITIES if c not in completed]
+        if not remaining:
+            logging.info("No cities remaining (all completed).")
+            sys.exit(0)
+        logging.info(f"Completed cities to remove: {len(completed)}. Remaining: {len(remaining)}.")
+        if _rewrite_cities_list(remaining):
+            print(f"Done. CITIES now has {len(remaining)} cities.")
+        else:
+            sys.exit(1)
         sys.exit(0)
     run_scraper()
