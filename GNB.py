@@ -45,6 +45,8 @@ MAX_LEADS_PER_CITY = 200
 CITY_BATCH_SIZE = 1  # Restart browser between every city (prevents renderer memory leaks)
 # Restart browser every N leads during Phase 2 to prevent tab crashes from memory buildup
 PHASE2_RESTART_EVERY_N_LEADS = 5
+# Max restarts per city in Phase 1 when tab crashes or results container is lost (avoid infinite loops)
+MAX_PHASE1_RECOVERIES = 3
 
 # Delays (seconds)
 SEARCH_DELAY = 2
@@ -1263,6 +1265,7 @@ def scroll_results_container(driver, target_count):
     Scroll the Google Maps results panel using pure JS on the feed container.
     Does NOT use scrollIntoView or window.scroll (both fail when off-screen).
     Fires synthetic scroll events to wake Intersection Observers.
+    Returns True if the results container was found and scrolling ran, False if container not found (e.g. tab crashed).
     """
     container = None
     for by, sel in [
@@ -1280,7 +1283,7 @@ def scroll_results_container(driver, target_count):
 
     if not container:
         logging.warning("Could not find results container for scrolling")
-        return
+        return False
 
     last_count = len(get_all_result_cards(driver))
     no_change_streak = 0
@@ -1336,6 +1339,7 @@ def scroll_results_container(driver, target_count):
                 last_count = final_count
 
     logging.info(f"Scrolling complete. Total cards: {len(get_all_result_cards(driver))}")
+    return True
 
 
 def smart_click_card(driver, card):
@@ -1946,11 +1950,33 @@ def scrape_website_details(driver, url, business_name):
 # =========================
 # PHASE 1 — Google Maps scraping for one city
 # =========================
-def run_phase1_for_city(driver, wait, city):
+def _phase1_do_recovery(restart_fn, get_driver, get_wait, city):
+    """
+    Restart driver, re-search city, and pre-scroll. Returns (driver, wait, True) on success,
+    (None, None, False) on failure. Used when tab crashes or results container is lost.
+    """
+    try:
+        restart_fn()
+        time.sleep(2)
+        driver, wait = get_driver(), get_wait()
+        if not search_location(driver, wait, city):
+            return None, None, False
+        time.sleep(SEARCH_DELAY)
+        scroll_results_container(driver, target_count=MAX_LEADS_PER_CITY + 20)
+        time.sleep(1)
+        return driver, wait, True
+    except Exception as e:
+        logging.warning(f"Phase 1 recovery failed: {e}")
+        return None, None, False
+
+
+def run_phase1_for_city(driver, wait, city, restart_fn=None, get_driver=None, get_wait=None):
     """
     Scrape all Google Maps card data for a city.
     Skips cities already marked completed (crash recovery).
     Pre-scrolls ALL cards before clicking, so lazy-load happens before interaction.
+    If restart_fn is provided and the tab crashes or results container is lost, restarts driver and re-searches to continue.
+    When using restart_fn, pass get_driver and get_wait (e.g. lambda: ctx["driver"], lambda: ctx["wait"]) so recovery uses the new driver.
     """
     if is_phase_completed(city, 'phase1'):
         logging.info(f"[SKIP] Phase 1 already done for {city}")
@@ -1984,9 +2010,22 @@ def run_phase1_for_city(driver, wait, city):
         scraped_count = existing_count
         error_count   = 0
         last_name     = "N/A"
+        recovery_attempts = 0
 
         while scraped_count < MAX_LEADS_PER_CITY:
             try:
+                # Proactive check: if driver is dead, recover once per attempt (up to MAX_PHASE1_RECOVERIES)
+                if not is_driver_alive(driver):
+                    if restart_fn and get_driver and get_wait and recovery_attempts < MAX_PHASE1_RECOVERIES:
+                        logging.warning("Driver not alive. Restarting and re-searching...")
+                        new_driver, new_wait, ok = _phase1_do_recovery(restart_fn, get_driver, get_wait, city)
+                        if ok:
+                            driver, wait = new_driver, new_wait
+                            recovery_attempts += 1
+                            continue
+                    logging.warning("Driver dead and recovery not available or max recoveries reached. Ending Phase 1 for this city.")
+                    break
+
                 # Basic check: ensure DB is still alive
                 try:
                     connection.ping(reconnect=True)
@@ -2020,8 +2059,17 @@ def run_phase1_for_city(driver, wait, city):
                 if not target_card:
                     logging.info("Scrolling for more leads...")
                     before = len(cards)
-                    scroll_results_container(driver, target_count=len(cards) + 20)
-                    if len(get_all_result_cards(driver)) <= before: break
+                    scroll_ok = scroll_results_container(driver, target_count=len(cards) + 20)
+                    if not scroll_ok and restart_fn and get_driver and get_wait and recovery_attempts < MAX_PHASE1_RECOVERIES:
+                        logging.warning("Results container missing (tab may have crashed). Restarting driver and re-searching...")
+                        new_driver, new_wait, ok = _phase1_do_recovery(restart_fn, get_driver, get_wait, city)
+                        if ok:
+                            driver, wait = new_driver, new_wait
+                            recovery_attempts += 1
+                            continue
+                        break
+                    if len(get_all_result_cards(driver)) <= before:
+                        break
                     continue
 
                 logging.info(f"\n--- Processing Card {len(names_seen_this_session) + 1} | Leads in DB: {scraped_count}/{MAX_LEADS_PER_CITY} | city: {city} ---")
@@ -2086,6 +2134,13 @@ def run_phase1_for_city(driver, wait, city):
 
             except Exception as e:
                 logging.warning(f"Error in Phase 1 lead loop: {e}")
+                if restart_fn and get_driver and get_wait and recovery_attempts < MAX_PHASE1_RECOVERIES and _is_tab_or_session_crash(e):
+                    logging.warning("Tab/session crash detected. Restarting driver and re-searching...")
+                    new_driver, new_wait, ok = _phase1_do_recovery(restart_fn, get_driver, get_wait, city)
+                    if ok:
+                        driver, wait = new_driver, new_wait
+                        recovery_attempts += 1
+                        continue
                 time.sleep(2)
 
     finally:
@@ -2346,7 +2401,8 @@ def run_scraper():
                     if not is_driver_alive(ctx["driver"]):
                         restart_driver()
                     try:
-                        run_phase1_for_city(ctx["driver"], ctx["wait"], city)
+                        run_phase1_for_city(ctx["driver"], ctx["wait"], city, restart_fn=restart_driver,
+                                            get_driver=lambda: ctx["driver"], get_wait=lambda: ctx["wait"])
                         time.sleep(random.uniform(4, 7))
                         break  # success — move to next city
                     except Exception as e:

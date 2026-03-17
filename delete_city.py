@@ -37,12 +37,12 @@ def delete_city_data(city_name):
 
         connection.commit()
         
-        print(f"✅ Successfully deleted {leads_deleted} leads.")
-        print(f"✅ Reset progress records ({progress_deleted} rows).")
+        print(f"OK: Deleted {leads_deleted} leads.")
+        print(f"OK: Reset progress records ({progress_deleted} rows).")
         print(f"{'='*40}\n")
 
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"Error: {e}")
         if connection:
             connection.rollback()
     finally:
