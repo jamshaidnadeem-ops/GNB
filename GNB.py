@@ -39,8 +39,7 @@ SEARCH_QUERY = "car detailers"
 # Philadelphia, Phoenix
 # ─────────────────────────────────────────────────────────────────────────────
 CITIES = [
-  "Santa Clarita", "Shreveport", "Spokane", "Stockton", "Tallahassee",
-  "Tucson", "Tulsa", "Washington DC", "Yonkers"
+  "Tallahassee", "Tucson", "Tulsa", "Washington DC", "Yonkers"
 ]
 MAX_LEADS_PER_CITY = 200
 CITY_BATCH_SIZE = 1  # Restart browser between every city (prevents renderer memory leaks)
@@ -464,6 +463,7 @@ def init_database():
             Timings TEXT,
             reviews TEXT,
             logo_url TEXT,
+            image_url TEXT,
             about_us TEXT,
             services TEXT,
             pricing TEXT,
@@ -482,6 +482,9 @@ def init_database():
         cursor.execute(f"SHOW COLUMNS FROM {TABLE_NAME} LIKE 'phase2_retry_attempted'")
         if not cursor.fetchone():
             cursor.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN phase2_retry_attempted TINYINT(1) DEFAULT 0")
+        cursor.execute(f"SHOW COLUMNS FROM {TABLE_NAME} LIKE 'image_url'")
+        if not cursor.fetchone():
+            cursor.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN image_url TEXT AFTER logo_url")
 
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS scraper_progress (
@@ -619,11 +622,14 @@ def save_google_maps_data(connection, city, name, rating, address, phone, websit
         if check_duplicate(connection, city, name):
             return False
         cursor = connection.cursor()
+        image_url = data.get('image_url') or 'N/A'
+        if not image_url or not str(image_url).startswith('http'):
+            image_url = 'N/A'
         cursor.execute(f"""
         INSERT INTO {TABLE_NAME}
-        (City, Name, Rating, Address, Phone, Website, Timings, reviews, logo_url, about_us, services, pricing, `Scraped At`)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        """, (city, name, rating, address, phone, website, timings, data.get('reviews', 'N/A'), "N/A", "N/A", "N/A", "N/A", scraped_at))
+        (City, Name, Rating, Address, Phone, Website, Timings, reviews, logo_url, image_url, about_us, services, pricing, `Scraped At`)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (city, name, rating, address, phone, website, timings, data.get('reviews', 'N/A'), "N/A", image_url, "N/A", "N/A", "N/A", scraped_at))
         # Autocommit is enabled in config, so no need for manual connection.commit()
         cursor.close()
         return True
@@ -1450,6 +1456,106 @@ def search_location(driver, wait, city):
 # =========================
 # DETAIL EXTRACTION
 # =========================
+
+# Listing image: same logic as test_image_scrape.py (S1–S6 strategies)
+_JS_FIRST_LH3 = """
+    var imgs = document.querySelectorAll('img');
+    for (var i = 0; i < imgs.length; i++) {
+        var s = imgs[i].currentSrc || imgs[i].src || '';
+        if (s.indexOf('lh3.googleusercontent.com') !== -1) return s;
+    }
+    return null;
+"""
+_JS_CLICK_PHOTOS_TAB = """
+    var btns = Array.from(document.querySelectorAll('button'));
+    for (var i = 0; i < btns.length; i++) {
+        if (btns[i].textContent.trim().toLowerCase() === 'photos') {
+            btns[i].click(); return true;
+        }
+    }
+    return false;
+"""
+
+def _norm_text(s):
+    """Normalize for fuzzy match (lowercase, alphanumeric + space)."""
+    if not s or not isinstance(s, str):
+        return ""
+    return re.sub(r"[^a-z0-9 ]", "", s.lower()).strip()
+
+def _get_img_src(driver, el):
+    """Return currentSrc/src if it contains lh3.googleusercontent.com."""
+    try:
+        src = js(driver,
+            "return (arguments[0].currentSrc||arguments[0].src||arguments[0].getAttribute('src')||'')||'';",
+            el)
+        if src and "lh3.googleusercontent.com" in src:
+            return src
+    except Exception:
+        pass
+    return None
+
+def extract_listing_image_url(driver, business_name):
+    """
+    Extract the main listing image URL from the Maps detail panel.
+    Uses S1 (name-matched Photo of button) then S2–S6 fallbacks. Returns URL or "N/A".
+    """
+    norm = _norm_text(business_name)
+    # S1 — button[aria-label*="Photo of"] with name match
+    try:
+        for btn in driver.find_elements(By.CSS_SELECTOR, "button[aria-label*='Photo of']"):
+            try:
+                lbl = _norm_text(btn.get_attribute("aria-label") or "")
+                if norm[:15] in lbl or (len(norm) >= 10 and lbl[:15] in norm):
+                    for img in btn.find_elements(By.TAG_NAME, "img"):
+                        src = _get_img_src(driver, img)
+                        if src:
+                            return src
+            except Exception:
+                continue
+    except Exception:
+        pass
+    # S2 — any button[aria-label*="Photo of"] img
+    try:
+        for img in driver.find_elements(By.CSS_SELECTOR, "button[aria-label*='Photo of'] img"):
+            src = _get_img_src(driver, img)
+            if src:
+                return src
+    except Exception:
+        pass
+    # S3 — img[src*="lh3"]
+    try:
+        for img in driver.find_elements(By.CSS_SELECTOR, "img[src*='lh3.googleusercontent.com']"):
+            src = _get_img_src(driver, img)
+            if src:
+                return src
+    except Exception:
+        pass
+    # S4 — JS scan
+    try:
+        src = js(driver, _JS_FIRST_LH3)
+        if src:
+            return src
+    except Exception:
+        pass
+    # S5 — click Photos tab then retry
+    try:
+        if js(driver, _JS_CLICK_PHOTOS_TAB):
+            time.sleep(2.5)
+            src = js(driver, _JS_FIRST_LH3)
+            if src:
+                return src
+    except Exception:
+        pass
+    # S6 — XPath heroHeaderImage
+    try:
+        for el in driver.find_elements(By.XPATH, "//button[contains(@jsaction,'heroHeaderImage')]//img"):
+            src = _get_img_src(driver, el)
+            if src:
+                return src
+    except Exception:
+        pass
+    return "N/A"
+
 def scrape_dealership_details(driver, wait):
     """
     Collect all Maps panel fields for one business.
@@ -1458,6 +1564,7 @@ def scrape_dealership_details(driver, wait):
     business website and then back — this reloads the Maps panel and destroys
     the div.jftiEf review cards before extract_reviews can read them.
     Running reviews first avoids this race condition entirely.
+    Image URL is extracted while still on the Maps panel (before reviews/timings).
     """
     try:
         time.sleep(DETAIL_PAGE_DELAY)
@@ -1466,6 +1573,7 @@ def scrape_dealership_details(driver, wait):
         rating  = extract_rating(driver)
         address = extract_address(driver)
         phone   = extract_phone(driver)
+        image_url = extract_listing_image_url(driver, name)
         reviews = extract_reviews(driver)
         timings = extract_timings(driver, website_url=website)
         return {
@@ -1476,6 +1584,7 @@ def scrape_dealership_details(driver, wait):
             'website': website,
             'timings': timings,
             'reviews': reviews,
+            'image_url': image_url,
         }
     except Exception as e:
         logging.error(f"Error scraping details: {e}")

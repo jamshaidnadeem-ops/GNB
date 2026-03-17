@@ -8,3 +8,4 @@ selenium
 undetected-chromedriver
 beautifulsoup4
 requests
+pyperclip
