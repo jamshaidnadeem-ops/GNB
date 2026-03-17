@@ -2054,10 +2054,11 @@ def run_phase1_for_city(driver, wait, city):
 
                         # Detailed Logging
                         logging.info(f"--- [SCRAPED DATA: {name}] ---")
-                        logging.info(f"  Rating:  {data['rating']}")
-                        logging.info(f"  Address: {data['address']}")
-                        logging.info(f"  Phone:   {data['phone']}")
-                        logging.info(f"  Website: {data['website']}")
+                        logging.info(f"  Rating:    {data['rating']}")
+                        logging.info(f"  Address:   {data['address']}")
+                        logging.info(f"  Phone:     {data['phone']}")
+                        logging.info(f"  Website:   {data['website']}")
+                        logging.info(f"  Image URL: {data.get('image_url', 'N/A')}")
                         logging.info(f"{'-'*40}")
                         
                         at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
