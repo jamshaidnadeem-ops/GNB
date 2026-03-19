@@ -1,0 +1,6 @@
+.env
+*.log
+__pycache__/
+*.json
+.pytest_cache/
+.DS_Store

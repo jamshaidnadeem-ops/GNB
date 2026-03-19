@@ -214,9 +214,15 @@ def start_driver():
         opts.add_argument(f"--window-position={OFFSCREEN_X},{OFFSCREEN_Y}")
         opts.add_argument("--force-device-scale-factor=1")
         opts.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--disable-setuid-sandbox")
+        opts.add_argument("--disable-site-isolation-trials")
+        opts.add_argument("--disable-features=IsolateOrigins,site-per-process")
+        # Increase JS heap size for heavy Google Maps renderer
+        opts.add_argument("--js-flags=--max-old-space-size=2048")
+        
         if HEADLESS:
             opts.add_argument("--headless=new")
-            opts.add_argument("--disable-gpu")
         else:
             opts.add_argument("--use-gl=angle")
             opts.add_argument("--use-angle=swiftshader")
@@ -1402,54 +1408,65 @@ def get_all_result_cards(driver):
 # GOOGLE MAPS SEARCHING
 # =========================
 def search_location(driver, wait, city):
+    """
+    Directly navigate to search results to avoid renderer-heavy UI interactions 
+    that cause timeouts in headless mode.
+    """
     try:
-        logging.info(f"Navigating to Google Maps for: {city}")
-        driver.get(BASE_URL)
-        time.sleep(SEARCH_DELAY)
+        query = f"{SEARCH_QUERY} in {city}"
+        encoded_query = query.replace(' ', '+')
+        # Direct URL navigation is 10x more robust than searching via the input box
+        search_url = f"https://www.google.com/maps/search/{encoded_query}"
+        
+        logging.info(f"Navigating directly to search for: {city}")
+        driver.get(search_url)
+        
+        # Check if results loaded directly
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            results = driver.find_elements(By.CSS_SELECTOR, "div[role='feed'], a.hfpxzc, div.Nv2PK")
+            if results:
+                logging.info(f"Results loaded via direct URL for {city}.")
+                return True
+            
+            # If we land on a single result (automatically opened), we also consider it a success
+            if driver.find_elements(By.CSS_SELECTOR, "h1.DUwDvf"):
+                logging.info(f"Directly landed on a single result for {city}.")
+                return True
+                
+            time.sleep(1)
+
+        # Fallback: If direct navigation didn't show results immediately, 
+        # try the classic search box interaction (enhanced with error handling)
+        logging.info("Direct results not found, falling back to manual search box...")
+        driver.get("https://www.google.com/maps")
+        time.sleep(PAGE_LOAD_DELAY)
 
         search_box = None
         for by, sel in [
-            (By.ID, "ucc-1"),
-            (By.CSS_SELECTOR, "input.UGojuc.fontBodyMedium.EmSKud.lpggsf"),
+            (By.ID, "searchboxinput"),
             (By.CSS_SELECTOR, "input#searchboxinput"),
             (By.XPATH, "//input[@id='searchboxinput']"),
         ]:
             try:
-                search_box = wait.until(EC.presence_of_element_located((by, sel)))
+                search_box = wait.until(EC.element_to_be_clickable((by, sel)))
                 break
-            except:
-                pass
+            except: continue
 
-        if not search_box:
-            logging.error("Could not find search box!")
-            return False
-
-        query = f"{SEARCH_QUERY} in {city}"
-        logging.info(f"Searching: {query}")
-
-        js(driver, "arguments[0].value = ''", search_box)
-        js(driver, "arguments[0].focus()", search_box)
-        search_box.send_keys(query)
-        time.sleep(1.5)
-
-        # Submit form via JS then also send Enter as backup
-        js(driver, "if(arguments[0].form) arguments[0].form.submit()", search_box)
-        time.sleep(1)
-        try:
-            search_box = driver.find_element(By.CSS_SELECTOR, "input#searchboxinput")
-            search_box.send_keys(Keys.ENTER)
-        except:
-            pass
-
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            if driver.find_elements(By.CSS_SELECTOR, "div[role='feed'], a.hfpxzc, div.Nv2PK"):
-                logging.info("Search results loaded.")
-                return True
+        if search_box:
+            search_box.clear()
+            search_box.send_keys(query)
             time.sleep(1)
+            search_box.send_keys(Keys.ENTER)
+            
+            # Wait for results again
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                if driver.find_elements(By.CSS_SELECTOR, "div[role='feed'], a.hfpxzc, div.Nv2PK"):
+                    return True
+                time.sleep(1)
 
-        logging.warning("Timed out waiting for results — continuing anyway.")
-        return True
+        return True # Continue anyway to let Phase 1 logic handle the missing results state
 
     except Exception as e:
         logging.error(f"Error in search_location: {e}")

@@ -22,6 +22,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import pymysql
+from pymysql.cursors import DictCursor
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
@@ -116,7 +117,7 @@ async def get_status():
     conn = get_db_connection()
     if conn:
         try:
-            cur = conn.cursor(pymysql.cursors.DictCursor)
+            cur = conn.cursor(DictCursor)
 
             cur.execute("SELECT city, phase, status FROM scraper_progress ORDER BY id")
             progress = cur.fetchall()
@@ -137,7 +138,7 @@ async def get_status():
 
             cur.execute(
                 f"SELECT COUNT(*) as n FROM {TABLE_NAME} "
-                f"WHERE Website!='N/A' AND Website LIKE 'http%%'"
+                f"WHERE Website!='N/A' AND Website LIKE 'http%'"
             )
             websites = (cur.fetchone() or {}).get("n", 0)
 
@@ -156,7 +157,8 @@ async def get_status():
         except Exception as e:
             logging.warning(f"Status DB error: {e}")
         finally:
-            conn.close()
+            if conn:
+                conn.close()
 
     return {
         "running": _alive(),
@@ -178,7 +180,7 @@ async def get_stats():
         cur.execute(f"SELECT COUNT(DISTINCT City) FROM {TABLE_NAME}")
         cities = cur.fetchone()[0]
         cur.execute(
-            f"SELECT COUNT(*) FROM {TABLE_NAME} WHERE Website!='N/A' AND Website LIKE 'http%%'"
+            f"SELECT COUNT(*) FROM {TABLE_NAME} WHERE Website!='N/A' AND Website LIKE 'http%'"
         )
         websites = cur.fetchone()[0]
         cur.execute(
@@ -190,7 +192,8 @@ async def get_stats():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 
 @app.get("/logs", include_in_schema=False)
@@ -203,9 +206,18 @@ async def get_logs(
     if os.path.exists(LOG_FILE):
         try:
             with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
-                all_lines = f.readlines()
-            total = len(all_lines)
-            lines = [l.rstrip("\n") for l in all_lines[since: since + limit]]
+                total = 0
+                for i, line in enumerate(f):
+                    total = i + 1
+                    if i < since:
+                        continue
+                    if len(lines) < limit:
+                        lines.append(line.rstrip("\n"))
+                    # If we already have enough lines, we must continue to count the rest
+                    # or stop and store the final total elsewhere.
+                    # To be truly efficient, we should just read the rest of the file
+                    # for the count only.
+                
         except Exception as e:
             logging.warning(f"Log read error: {e}")
     return {
@@ -223,20 +235,24 @@ async def get_leads():
     if not conn:
         raise HTTPException(status_code=500, detail="DB connection failed")
     try:
-        cur = conn.cursor(pymysql.cursors.DictCursor)
+        cur = conn.cursor(DictCursor)
         cur.execute(f"SELECT * FROM {TABLE_NAME} ORDER BY City, Name")
         rows = cur.fetchall()
         cur.close()
+        processed = []
         for r in rows:
-            for k, v in r.items():
+            row_dict = dict(r)
+            for k, v in row_dict.items():
                 if hasattr(v, "isoformat"):
-                    r[k] = str(v)
-        logging.info(f"Served {len(rows)} leads")
-        return rows
+                    row_dict[k] = str(v)
+            processed.append(row_dict)
+        logging.info(f"Served {len(processed)} leads")
+        return processed
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 
 @app.get("/leads/full_details", include_in_schema=True)
@@ -246,7 +262,7 @@ async def get_leads_full_details():
     if not conn:
         raise HTTPException(status_code=500, detail="DB connection failed")
     try:
-        cur = conn.cursor(pymysql.cursors.DictCursor)
+        cur = conn.cursor(DictCursor)
         cur.execute(f"""
             SELECT * FROM {TABLE_NAME}
             WHERE City     != 'N/A' AND COALESCE(City, '') != ''
@@ -265,16 +281,20 @@ async def get_leads_full_details():
         """)
         rows = cur.fetchall()
         cur.close()
+        processed = []
         for r in rows:
-            for k, v in r.items():
+            row_dict = dict(r)
+            for k, v in row_dict.items():
                 if hasattr(v, "isoformat"):
-                    r[k] = str(v)
-        logging.info(f"Served {len(rows)} full-detail leads")
-        return rows
+                    row_dict[k] = str(v)
+            processed.append(row_dict)
+        logging.info(f"Served {len(processed)} full-detail leads")
+        return processed
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 
 # ── Ngrok (local dev only — skipped on Railway) ───────────────────────────────
