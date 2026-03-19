@@ -39,7 +39,9 @@ SEARCH_QUERY = "car detailers"
 # Philadelphia, Phoenix
 # ─────────────────────────────────────────────────────────────────────────────
 CITIES = [
-  "Tallahassee", "Tucson", "Tulsa", "Washington DC", "Yonkers"
+  "Washington DC", "New York", "Los Angeles", "Chicago", "Houston", 
+  "Phoenix", "Philadelphia", "Columbus", "Seattle", "Oklahoma City", 
+  "Cleveland"
 ]
 MAX_LEADS_PER_CITY = 200
 CITY_BATCH_SIZE = 1  # Restart browser between every city (prevents renderer memory leaks)
