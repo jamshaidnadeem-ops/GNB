@@ -122,6 +122,10 @@ def _start_selenium_chrome_fallback(browser_path=None):
     if HEADLESS:
         opts.add_argument("--headless=new")
         opts.add_argument("--disable-gpu")
+        opts.add_argument("--disable-software-rasterizer")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-setuid-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
     else:
         opts.add_argument("--use-gl=angle")
         opts.add_argument("--use-angle=swiftshader")
@@ -224,7 +228,14 @@ def start_driver():
         opts.add_argument("--js-flags=--max-old-space-size=2048")
         
         if HEADLESS:
+            # For UC, passing headless=True to the constructor is better, 
+            # but we keep the flag for standard Selenium fallback too.
             opts.add_argument("--headless=new")
+            opts.add_argument("--disable-gpu")
+            opts.add_argument("--disable-software-rasterizer")
+            opts.add_argument("--disable-dev-shm-usage")
+            opts.add_argument("--no-sandbox")
+            opts.add_argument("--disable-setuid-sandbox")
         else:
             opts.add_argument("--use-gl=angle")
             opts.add_argument("--use-angle=swiftshader")
@@ -232,25 +243,34 @@ def start_driver():
         return opts
 
     try:
-        kwargs = {"options": create_options(), "use_subprocess": True, "version_main": version_main}
+        kwargs = {
+            "options": create_options(), 
+            "use_subprocess": True, 
+            "version_main": version_main,
+            "headless": HEADLESS
+        }
         if browser_path:
             kwargs["browser_executable_path"] = browser_path
         driver = uc.Chrome(**kwargs)
     except (HTTPError, Exception) as e:
         if isinstance(e, HTTPError) and e.code == 404:
-            logging.warning("undetected_chromedriver patcher got 404 (ChromeDriver repo). Falling back to standard Selenium Chrome.")
+            logging.warning("undetected_chromedriver patcher got 404. Falling back to standard Selenium Chrome.")
             driver = _start_selenium_chrome_fallback(browser_path)
             if driver is None:
                 raise e
-        elif "version" in str(e).lower() or "session not created" in str(e).lower():
-            logging.warning(f"Version mismatch retry... Attempting fallback version. Error: {e}")
+        elif "version" in str(e).lower() or "session not created" in str(e).lower() or "reach" in str(e).lower():
+            logging.warning(f"Version mismatch or connection error: {e}. Attempting fallback with no fixed version.")
             try:
-                kwargs = {"options": create_options(), "use_subprocess": True, "version_main": 145}
+                kwargs = {
+                    "options": create_options(), 
+                    "use_subprocess": True, 
+                    "headless": HEADLESS
+                }
                 if browser_path:
                     kwargs["browser_executable_path"] = browser_path
                 driver = uc.Chrome(**kwargs)
             except Exception as e2:
-                logging.warning(f"UC fallback failed: {e2}. Trying standard Selenium Chrome.")
+                logging.warning(f"UC retry failed: {e2}. Trying standard Selenium Chrome.")
                 driver = _start_selenium_chrome_fallback(browser_path)
             if driver is None:
                 raise e
@@ -262,10 +282,7 @@ def start_driver():
                     logging.warning(f"Resource temporarily unavailable, retrying in 10s (attempt {retry+2}/3)...")
                     time.sleep(10)
                     try:
-                        kwargs = {"options": create_options(), "use_subprocess": True, "version_main": version_main}
-                        if browser_path:
-                            kwargs["browser_executable_path"] = browser_path
-                        driver = uc.Chrome(**kwargs)
+                        driver = uc.Chrome(options=create_options(), use_subprocess=True, headless=HEADLESS, browser_executable_path=browser_path)
                         break
                     except Exception as re:
                         e = re
