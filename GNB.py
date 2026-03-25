@@ -38,11 +38,7 @@ SEARCH_QUERY = "car detailers"
 # Colorado Springs, Columbus, Houston, Los Angeles, New York,
 # Philadelphia, Phoenix
 # ─────────────────────────────────────────────────────────────────────────────
-CITIES = [
-  "Washington DC", "New York", "Los Angeles", "Chicago", "Houston", 
-  "Phoenix", "Philadelphia", "Columbus", "Seattle", "Oklahoma City", 
-  "Cleveland"
-]
+CITIES = []
 MAX_LEADS_PER_CITY = 200
 CITY_BATCH_SIZE = 1  # Restart browser between every city (prevents renderer memory leaks)
 # Restart browser every N leads during Phase 2 to prevent tab crashes from memory buildup
@@ -2367,7 +2363,7 @@ def run_retry_sweep(get_driver, restart_fn=None):
 # =========================
 # MAIN — Batched execution
 # =========================
-def run_scraper():
+def run_scraper(override_cities=None):
     """
     Batch strategy:
       - Only run cities that have not completed both phase1 and phase2 (skips completed).
@@ -2383,8 +2379,9 @@ def run_scraper():
         when starting Chrome; we retry with delay and wait longer after quit() before
         starting a new driver so the OS can reclaim resources.
     """
+    cities = override_cities if override_cities is not None else CITIES
     logging.info("Starting Google Maps Car Detailers Scraper")
-    logging.info(f"Cities: {CITIES}")
+    logging.info(f"Cities to process: {cities}")
     logging.info(f"Batch size: {CITY_BATCH_SIZE} | Headless: {HEADLESS}")
     logging.info("Browser placed off-screen — Chrome stays active, you can use your PC normally.")
 
@@ -2394,7 +2391,7 @@ def run_scraper():
 
     # Only run cities that have not completed both phase1 and phase2 (reduces load, avoids rework).
     completed_cities = get_cities_with_both_phases_completed()
-    cities_to_run = [c for c in CITIES if c not in completed_cities]
+    cities_to_run = [c for c in cities if c not in completed_cities]
     if not cities_to_run:
         logging.info("All cities already have phase1 and phase2 completed. Nothing to do.")
         return
@@ -2521,6 +2518,13 @@ def _rewrite_cities_list(remaining_cities):
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--report":
         report_progress()
+        sys.exit(0)
+    
+    # Handle --cities flag (JSON input from API)
+    if len(sys.argv) > 1 and sys.argv[1] == "--cities" and len(sys.argv) > 2:
+        cities_input = sys.argv[2].split(",")
+        cities_list = [c.strip() for c in cities_input if c.strip()]
+        run_scraper(override_cities=cities_list)
         sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "--remove-completed-cities":
         if not init_database():

@@ -23,6 +23,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import pymysql
 from pymysql.cursors import DictCursor
+from pydantic import BaseModel
+from typing import List, Optional
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
@@ -71,9 +73,13 @@ def _alive():
     return _proc is not None and _proc.poll() is None
 
 
+class StartRequest(BaseModel):
+    cities: List[str]
+
+
 @app.post("/start")
-async def start_scraper():
-    """Start GNB.py as a background process. No body required."""
+async def start_scraper(request: StartRequest):
+    """Start GNB.py as a background process. Cities list required in JSON."""
     global _proc
     with _lock:
         if _alive():
@@ -81,13 +87,16 @@ async def start_scraper():
         if not os.path.exists(SCRIPT):
             raise HTTPException(status_code=404, detail=f"GNB.py not found at {SCRIPT}")
         try:
-            # Inherit stdout/stderr so scraper logs appear in the same stream (e.g. Digital Ocean / Railway logs).
+            # Convert list of cities to comma-separated string for GNB.py
+            cities_str = ",".join(request.cities)
+            
+            # Inherit stdout/stderr
             _proc = subprocess.Popen(
-                [sys.executable, SCRIPT],
+                [sys.executable, SCRIPT, "--cities", cities_str],
                 cwd=BASE,
             )
-            logging.info(f"Scraper started PID={_proc.pid}")
-            return {"status": "started", "pid": _proc.pid}
+            logging.info(f"Scraper started PID={_proc.pid} for {len(request.cities)} cities")
+            return {"status": "started", "pid": _proc.pid, "cities": request.cities}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
