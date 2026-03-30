@@ -159,27 +159,41 @@ def start_driver():
                 (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Google\Chrome\BLBeacon"),
             ]:
                 try:
-                    key = winreg.OpenKey(reg_path[0], reg_path[1])
-                    v, _ = winreg.QueryValueEx(key, "version")
-                    version_main = int(v.split('.')[0])
-                    break
+                    with winreg.OpenKey(reg_path[0], reg_path[1]) as key:
+                        v, _ = winreg.QueryValueEx(key, "version")
+                        version_main = int(v.split('.')[0])
+                        break
                 except: continue
         else:
-            # Linux detection (Railway/Docker)
+            # Linux detection (Railway/Docker/Ubuntu)
             import subprocess
-            for cmd in ["google-chrome", "google-chrome-stable", "chromium-browser"]:
+            # Check PATH first, then common binary locations
+            commands = ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"]
+            paths = ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium-browser", "/usr/bin/chromium"]
+            
+            detected = False
+            for cmd in (commands + paths):
                 try:
+                    # check if it exists if it's a path
+                    if cmd.startswith("/") and not os.path.exists(cmd):
+                        continue
+                        
                     out = subprocess.check_output([cmd, "--version"], stderr=subprocess.STDOUT).decode()
                     v = re.search(r'(\d+)\.', out)
                     if v:
                         version_main = int(v.group(1))
+                        logging.info(f"Detected Chrome version via {cmd}: {version_main}")
+                        detected = True
                         break
                 except: continue
-    except:
-        pass
+            
+            if not detected:
+                logging.warning("Could not detect Chrome version via standard commands/paths.")
+    except Exception as e:
+        logging.warning(f"Error during Chrome version detection: {e}")
     
     if version_main:
-        logging.info(f"Detected Chrome version: {version_main}")
+        logging.info(f"Targeting ChromeDriver version: {version_main}")
 
     # On Linux (e.g. Digital Ocean), find Chrome so uc doesn't set binary_location to non-string.
     browser_path = None
@@ -221,7 +235,20 @@ def start_driver():
         opts.add_argument("--disable-site-isolation-trials")
         opts.add_argument("--disable-features=IsolateOrigins,site-per-process")
         # Increase JS heap size for heavy Google Maps renderer
-        opts.add_argument("--js-flags=--max-old-space-size=2048")
+        # Optimize for low-memory environments (1GB VPS)
+        opts.add_argument("--js-flags=--max-old-space-size=512")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--disable-software-rasterizer")
+        # Aggressively reduce memory footprint
+        opts.add_argument("--proxy-server='direct://'")
+        opts.add_argument("--proxy-bypass-list=*")
+        opts.add_argument("--disable-default-apps")
+        opts.add_argument("--disable-extensions")
+        opts.add_argument("--disable-component-update")
+        opts.add_argument("--disable-background-networking")
+        opts.add_argument("--disable-sync")
         
         if HEADLESS:
             # For UC, passing headless=True to the constructor is better, 
@@ -1483,6 +1510,19 @@ def search_location(driver, wait, city):
 
         return True # Continue anyway to let Phase 1 logic handle the missing results state
 
+    except TimeoutException as e:
+        logging.error(f"Timeout in search_location for {city}: {e}")
+        # On timeout, try one fallback navigation to a blank page then try base maps
+        try:
+            driver.get("about:blank")
+            time.sleep(1)
+            driver.get("https://www.google.com/maps")
+            time.sleep(PAGE_LOAD_DELAY)
+            # If we got here, maybe we can try the manual search box part of the fallback
+            # But usually a renderer timeout means we should wrap up this attempt
+            return False 
+        except:
+            return False
     except Exception as e:
         logging.error(f"Error in search_location: {e}")
         import traceback
@@ -2032,8 +2072,7 @@ def run_phase1_for_city(driver, wait, city, restart_fn=None, get_driver=None, ge
                 names_seen_this_session.add(n_low)
 
         if not search_location(driver, wait, city):
-            logging.error(f"Search failed for {city}")
-            return 0
+            raise Exception(f"Search failed for {city} (navigation/renderer timeout)")
 
         # Pre-scroll
         logging.info("Pre-scrolling to load all cards...")
