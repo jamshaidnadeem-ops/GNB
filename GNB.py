@@ -157,11 +157,13 @@ def start_driver():
             for reg_path in [
                 (winreg.HKEY_CURRENT_USER,  r"Software\Google\Chrome\BLBeacon"),
                 (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Google\Chrome\BLBeacon"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Google\Update\Clients\{8A69D345-D564-463c-AFF1-A69D9E530F96}"), # Common alternate path
             ]:
                 try:
                     with winreg.OpenKey(reg_path[0], reg_path[1]) as key:
-                        v, _ = winreg.QueryValueEx(key, "version")
+                        v, _ = winreg.QueryValueEx(key, "version" if "Beacon" in reg_path[1] else "pv")
                         version_main = int(v.split('.')[0])
+                        logging.info(f"Detected Chrome version via reg key {reg_path[1]}: {version_main}")
                         break
                 except: continue
         else:
@@ -169,7 +171,10 @@ def start_driver():
             import subprocess
             # Check PATH first, then common binary locations
             commands = ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"]
-            paths = ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium-browser", "/usr/bin/chromium"]
+            paths = [
+                "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium-browser", "/usr/bin/chromium",
+                "/usr/local/bin/google-chrome", "/snap/bin/google-chrome", "/opt/google/chrome/google-chrome"
+            ]
             
             detected = False
             for cmd in (commands + paths):
@@ -188,12 +193,23 @@ def start_driver():
                 except: continue
             
             if not detected:
-                logging.warning("Could not detect Chrome version via standard commands/paths.")
+                # Last resort Linux: check where google-chrome is
+                try:
+                    p = subprocess.check_output(["which", "google-chrome"]).decode().strip()
+                    if p:
+                        out = subprocess.check_output([p, "--version"]).decode()
+                        v = re.search(r'(\d+)\.', out)
+                        if v:
+                            version_main = int(v.group(1))
+                            logging.info(f"Detected Chrome version via which: {version_main}")
+                except: pass
     except Exception as e:
         logging.warning(f"Error during Chrome version detection: {e}")
     
     if version_main:
         logging.info(f"Targeting ChromeDriver version: {version_main}")
+    else:
+        logging.warning("Chrome version detection failed - uc will attempt autodetection.")
 
     # On Linux (e.g. Digital Ocean), find Chrome so uc doesn't set binary_location to non-string.
     browser_path = None
@@ -276,17 +292,27 @@ def start_driver():
             kwargs["browser_executable_path"] = browser_path
         driver = uc.Chrome(**kwargs)
     except (HTTPError, Exception) as e:
+        emsg = str(e).lower()
         if isinstance(e, HTTPError) and e.code == 404:
             logging.warning("undetected_chromedriver patcher got 404. Falling back to standard Selenium Chrome.")
             driver = _start_selenium_chrome_fallback(browser_path)
             if driver is None:
                 raise e
-        elif "version" in str(e).lower() or "session not created" in str(e).lower() or "reach" in str(e).lower():
-            logging.warning(f"Version mismatch or connection error: {e}. Attempting fallback with no fixed version.")
+        elif "version" in emsg or "session not created" in emsg or "reach" in emsg:
+            # PERMANENT FIX: Extract version from error message if autodetection failed or mismatched
+            # Example message: "This version of ChromeDriver only supports Chrome version 147... Current browser version is 146..."
+            target_v = version_main
+            found_v = re.search(r"browser version is (\d+)\.", emsg)
+            if found_v:
+                target_v = int(found_v.group(1))
+                logging.info(f"Parsed correct Chrome version from error message: {target_v}. Retrying...")
+            
+            logging.warning(f"Version mismatch or connection error: {e}. Attempting fallback with version {target_v}.")
             try:
                 kwargs = {
                     "options": create_options(), 
                     "use_subprocess": True, 
+                    "version_main": target_v,
                     "headless": HEADLESS
                 }
                 if browser_path:
@@ -1461,27 +1487,45 @@ def search_location(driver, wait, city):
         search_url = f"https://www.google.com/maps/search/{encoded_query}"
         
         logging.info(f"Navigating directly to search for: {city}")
-        driver.get(search_url)
+        
+        # PERMANENT FIX for Timeout: Set a short strategic timeout for navigation load
+        # Google Maps often loads results but hangs the 'load' event due to heavy JS.
+        original_timeout = driver.caps.get('pageLoadTimeout', 60000) / 1000
+        driver.set_page_load_timeout(35) # Maps usually results show within 30s
+        
+        try:
+            driver.get(search_url)
+        except TimeoutException:
+            logging.warning(f"Navigation to {city} timed out, checking if results arrived anyway...")
+            # If it timed out, force stop the renderer to proceed
+            try: js(driver, "window.stop();")
+            except: pass
+        finally:
+            driver.set_page_load_timeout(60) # Restore original
         
         # Check if results loaded directly
-        deadline = time.time() + 25
+        deadline = time.time() + 15
         while time.time() < deadline:
-            results = driver.find_elements(By.CSS_SELECTOR, "div[role='feed'], a.hfpxzc, div.Nv2PK")
-            if results:
-                logging.info(f"Results loaded via direct URL for {city}.")
-                return True
-            
-            # If we land on a single result (automatically opened), we also consider it a success
-            if driver.find_elements(By.CSS_SELECTOR, "h1.DUwDvf"):
-                logging.info(f"Directly landed on a single result for {city}.")
-                return True
-                
+            try:
+                results = driver.find_elements(By.CSS_SELECTOR, "div[role='feed'], a.hfpxzc, div.Nv2PK")
+                if results or driver.find_elements(By.CSS_SELECTOR, "h1.DUwDvf"):
+                    logging.info(f"Results loaded (directly or via landing) for {city}.")
+                    return True
+            except: pass
             time.sleep(1)
 
         # Fallback: If direct navigation didn't show results immediately, 
         # try the classic search box interaction (enhanced with error handling)
         logging.info("Direct results not found, falling back to manual search box...")
-        driver.get("https://www.google.com/maps")
+        try:
+            driver.set_page_load_timeout(40)
+            driver.get("https://www.google.com/maps")
+        except:
+            try: js(driver, "window.stop();")
+            except: pass
+        finally:
+            driver.set_page_load_timeout(60)
+            
         time.sleep(PAGE_LOAD_DELAY)
 
         search_box = None
@@ -1502,7 +1546,7 @@ def search_location(driver, wait, city):
             search_box.send_keys(Keys.ENTER)
             
             # Wait for results again
-            deadline = time.time() + 15
+            deadline = time.time() + 20
             while time.time() < deadline:
                 if driver.find_elements(By.CSS_SELECTOR, "div[role='feed'], a.hfpxzc, div.Nv2PK"):
                     return True
@@ -1510,23 +1554,8 @@ def search_location(driver, wait, city):
 
         return True # Continue anyway to let Phase 1 logic handle the missing results state
 
-    except TimeoutException as e:
-        logging.error(f"Timeout in search_location for {city}: {e}")
-        # On timeout, try one fallback navigation to a blank page then try base maps
-        try:
-            driver.get("about:blank")
-            time.sleep(1)
-            driver.get("https://www.google.com/maps")
-            time.sleep(PAGE_LOAD_DELAY)
-            # If we got here, maybe we can try the manual search box part of the fallback
-            # But usually a renderer timeout means we should wrap up this attempt
-            return False 
-        except:
-            return False
     except Exception as e:
-        logging.error(f"Error in search_location: {e}")
-        import traceback
-        logging.error(traceback.format_exc())
+        logging.error(f"Error in search_location for {city}: {e}")
         return False
 
 # =========================
