@@ -299,9 +299,20 @@ def start_driver():
             if driver is None:
                 raise e
         elif "version" in emsg or "session not created" in emsg or "reach" in emsg:
+            # CLEANUP: If chrome is already not reachable, kill orphan processes on Linux
+            if sys.platform != "win32":
+                try:
+                    import subprocess
+                    subprocess.call(["pkill", "-9", "-f", "chrome"])
+                    subprocess.call(["pkill", "-9", "-f", "chromedriver"])
+                    logging.info("Cleaned up orphaned Chrome processes.")
+                    time.sleep(2)
+                except: pass
+
             # PERMANENT FIX: Extract version from error message if autodetection failed or mismatched
             # Example message: "This version of ChromeDriver only supports Chrome version 147... Current browser version is 146..."
             target_v = version_main
+            import re # Explicit local import to be 100% safe from shadowing
             found_v = re.search(r"browser version is (\d+)\.", emsg)
             if found_v:
                 target_v = int(found_v.group(1))
@@ -326,15 +337,15 @@ def start_driver():
         else:
             driver = None
             # On resource exhaustion (errno 11) after long runs, retry uc.Chrome with delay before fallback
-            if (isinstance(e, (BlockingIOError, OSError)) and getattr(e, "errno", None) == 11) or "resource temporarily unavailable" in str(e).lower():
+            if (isinstance(e, (BlockingIOError, OSError)) and getattr(e, "errno", None) == 11) or "resource temporarily unavailable" in emsg:
                 for retry in range(2):
                     logging.warning(f"Resource temporarily unavailable, retrying in 10s (attempt {retry+2}/3)...")
                     time.sleep(10)
                     try:
                         driver = uc.Chrome(options=create_options(), use_subprocess=True, headless=HEADLESS, browser_executable_path=browser_path)
                         break
-                    except Exception as re:
-                        e = re
+                    except Exception as re_ex:
+                        e = re_ex
             if driver is None:
                 logging.warning(f"undetected_chromedriver failed: {e}. Trying standard Selenium Chrome.")
                 driver = _start_selenium_chrome_fallback(browser_path)
